@@ -139,6 +139,10 @@ pub struct LayoutConfig {
     pub show_icons: bool,
     /// Draw the desktop name/number inside each cell (behind the windows).
     pub show_names: bool,
+    /// Smallest cell width, as a fraction of the natural width, before the strip starts to
+    /// slide (hiding desktops behind overflow markers) instead of shrinking further.
+    /// Clamped to 0.3..=1.0 (1.0 = never shrink).
+    pub min_cell_width: f32,
 }
 
 impl Default for LayoutConfig {
@@ -148,6 +152,7 @@ impl Default for LayoutConfig {
             vertical_margin: 10.0,
             show_icons: true,
             show_names: false,
+            min_cell_width: 0.8,
         }
     }
 }

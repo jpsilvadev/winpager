@@ -13,6 +13,15 @@ pub enum Placement {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum ChevronMode {
+    /// Switch one desktop towards the clicked side (the strip slides one desktop per click).
+    Step,
+    /// Switch to the nearest hidden desktop on the clicked side.
+    Jump,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Anchor {
     /// Right-aligned, just left of the notification area.
     Tray,
@@ -32,6 +41,8 @@ pub struct Config {
     pub wrap_scroll: bool,
     /// Reverse the scroll direction.
     pub invert_scroll: bool,
+    /// What clicking an overflow chevron does.
+    pub chevron: ChevronMode,
 }
 
 impl Default for Config {
@@ -43,6 +54,7 @@ impl Default for Config {
             offset: 8,
             wrap_scroll: false,
             invert_scroll: false,
+            chevron: ChevronMode::Step,
         }
     }
 }
@@ -81,7 +93,12 @@ impl Config {
 
     /// Clamp values to sane ranges.
     fn sanitized(mut self) -> Config {
-        self.layout.spacing = self.layout.spacing.clamp(0.0, 64.0);
+        self.layout.min_cell_width = if self.layout.min_cell_width.is_finite() {
+            self.layout.min_cell_width.clamp(0.3, 1.0)
+        } else {
+            LayoutConfig::default().min_cell_width
+        };
+        self.layout.spacing =self.layout.spacing.clamp(0.0, 64.0);
         self.layout.vertical_margin = self.layout.vertical_margin.clamp(0.0, 64.0);
         self.offset = self.offset.clamp(-4000, 4000);
         self
@@ -97,5 +114,30 @@ impl Config {
         let text = toml::to_string_pretty(self).context("serializing config")?;
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chevron_is_lowercase_and_defaults_to_step() {
+        assert_eq!(Config::default().chevron, ChevronMode::Step);
+        let c: Config = toml::from_str("chevron = \"jump\"").unwrap();
+        assert_eq!(c.chevron, ChevronMode::Jump);
+        assert!(toml::to_string(&Config::default()).unwrap().contains("chevron = \"step\""));
+    }
+
+    #[test]
+    fn min_cell_width_is_clamped() {
+        let mut c = Config::default();
+        assert_eq!(c.layout.min_cell_width, 0.8);
+        for (v, want) in [(0.0, 0.3), (9.0, 1.0), (0.5, 0.5)] {
+            c.layout.min_cell_width = v;
+            assert_eq!(c.clone().sanitized().layout.min_cell_width, want);
+        }
+        c.layout.min_cell_width = f32::NAN;
+        assert_eq!(c.sanitized().layout.min_cell_width, 0.8);
     }
 }

@@ -6,7 +6,7 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCSTR, PCWSTR, w};
 
-use crate::config::Placement;
+use crate::config::{ChevronMode, Placement};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
@@ -15,6 +15,7 @@ pub enum Cmd {
     ShowIcons,
     ShowNames,
     Place(Placement),
+    Chevron(ChevronMode),
     Autostart,
     OpenConfig,
     Exit,
@@ -26,6 +27,8 @@ const ID_ICONS: usize = 20;
 const ID_NAMES: usize = 21;
 const ID_PLACE_TASKBAR: usize = 30;
 const ID_PLACE_FLOATING: usize = 31;
+const ID_CHEVRON_STEP: usize = 32;
+const ID_CHEVRON_JUMP: usize = 33;
 const ID_AUTOSTART: usize = 40;
 const ID_CONFIG: usize = 41;
 const ID_EXIT: usize = 99;
@@ -37,6 +40,7 @@ pub struct MenuState {
     pub show_icons: bool,
     pub show_names: bool,
     pub placement: Placement,
+    pub chevron: ChevronMode,
     pub autostart: bool,
 }
 
@@ -56,6 +60,7 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
             }
         };
         let place_menu = CreatePopupMenu().ok();
+        let chevron_menu = CreatePopupMenu().ok();
 
         let mut ok = true;
         let mut add = |m: HMENU, fl: MENU_ITEM_FLAGS, id: usize, text: PCWSTR| {
@@ -88,6 +93,22 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
             );
             add(menu, MF_STRING | MF_POPUP, pm.0 as usize, w!("Placement"));
         }
+        if let Some(cm) = chevron_menu {
+            add(cm, MF_STRING, ID_CHEVRON_STEP, w!("Step (one desktop)"));
+            add(cm, MF_STRING, ID_CHEVRON_JUMP, w!("Jump (nearest hidden)"));
+            let sel = match st.chevron {
+                ChevronMode::Step => ID_CHEVRON_STEP,
+                ChevronMode::Jump => ID_CHEVRON_JUMP,
+            };
+            let _ = CheckMenuRadioItem(
+                cm,
+                ID_CHEVRON_STEP as u32,
+                ID_CHEVRON_JUMP as u32,
+                sel as u32,
+                MF_BYCOMMAND.0,
+            );
+            add(menu, MF_STRING | MF_POPUP, cm.0 as usize, w!("Chevron click"));
+        }
         add(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add(menu, MF_STRING | flag(st.autostart), ID_AUTOSTART, w!("Start with Windows"));
         add(menu, MF_STRING, ID_CONFIG, w!("Open config file"));
@@ -116,6 +137,8 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
             ID_NAMES => Some(Cmd::ShowNames),
             ID_PLACE_TASKBAR => Some(Cmd::Place(Placement::Taskbar)),
             ID_PLACE_FLOATING => Some(Cmd::Place(Placement::Floating)),
+            ID_CHEVRON_STEP => Some(Cmd::Chevron(ChevronMode::Step)),
+            ID_CHEVRON_JUMP => Some(Cmd::Chevron(ChevronMode::Jump)),
             ID_AUTOSTART => Some(Cmd::Autostart),
             ID_CONFIG => Some(Cmd::OpenConfig),
             ID_EXIT => Some(Cmd::Exit),
