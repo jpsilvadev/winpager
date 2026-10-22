@@ -28,7 +28,9 @@ without saying so explicitly in your report; if you must add something, keep it 
 | `layout.rs` | render | grid geometry (rows/cols), window rect mapping, hit testing |
 | `render.rs` | render | Direct2D drawing into a premultiplied DIB + `UpdateLayeredWindow`; `render_to_png` for tests |
 | `theme.rs` | render | colors from Windows light/dark setting and accent color |
-| `main.rs`, `host.rs`, `taskbar.rs`, `config.rs` | host | window + message loop, taskbar embedding, input, hooks, menu, tooltip, config file |
+| `main.rs`, `host.rs`, `taskbar.rs`, `config.rs` (+ any new host-side files) | host | window + message loop, taskbar embedding, input, hooks, menu, tooltip, config file |
+
+`src/lib.rs` exposes all modules so test harnesses in `examples/` can `use winpager::...`. Add a new module there only if you own it, and say so in your report.
 
 Public signatures in the stub files are the contract between modules. Keep them; you may
 add new public items. Private implementation is yours.
