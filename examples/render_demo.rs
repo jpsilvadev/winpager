@@ -20,7 +20,7 @@ use winpager::model::*;
 use winpager::render::Renderer;
 use winpager::theme::{Rgba, Theme};
 
-const SCREEN: RectI = RectI { left: 0, top: 0, right: 3440, bottom: 1440 };
+const SCREEN: RectI = RectI { left: 0, top: 0, right: 3440, bottom: 1392 }; // primary work area (3440x1440 minus the 48 px taskbar)
 
 // ---------------------------------------------------------------------------------------
 // Synthetic icons
@@ -90,12 +90,18 @@ fn guid(i: usize) -> GUID {
 const H: i32 = 1392; // screen height above a 48 px taskbar
 
 fn fake_snapshot() -> Snapshot {
+    fake_snapshot_n(7, 4)
+}
+
+/// The 7-desktop scene, extended to `n` desktops by repeating the per-desktop layouts.
+fn fake_snapshot_n(n: usize, current: usize) -> Snapshot {
     let ic = icons();
-    let names = ["", "", "Work", "", "", "", ""];
-    let desktops: Vec<DesktopInfo> = names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| DesktopInfo { id: guid(i), index: i, name: n.to_string() })
+    let desktops: Vec<DesktopInfo> = (0..n)
+        .map(|i| DesktopInfo {
+            id: guid(i),
+            index: i,
+            name: if i == 2 { "Work".to_string() } else { String::new() },
+        })
         .collect();
     let mut next = 100isize;
     let mut win = |desk: Option<usize>, r: [i32; 4], icon: usize, fg: bool| {
@@ -132,7 +138,18 @@ fn fake_snapshot() -> Snapshot {
         // Desktop 6: single centered window.
         win(Some(6), [860, 200, 2580, 1200], 3, false),
     ];
-    Snapshot { desktops, current: 4, screen: SCREEN, windows }
+    // Desktops beyond the 7 hand-made ones reuse the layouts of desktop `i % 7`.
+    let mut extra = Vec::new();
+    for i in 7..n {
+        for w in windows.iter().filter(|w| w.desktop == Some(guid(i % 7))) {
+            next += 1;
+            extra.push(WindowInfo { hwnd: next, desktop: Some(guid(i)), ..w.clone() });
+        }
+    }
+    let mut windows = windows;
+    windows.extend(extra);
+    windows.retain(|w| w.desktop.is_none_or(|d| desktops.iter().any(|x| x.id == d)));
+    Snapshot { desktops, current: current.min(n.saturating_sub(1)), screen: SCREEN, windows }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -169,6 +186,8 @@ struct Case<'a> {
     height: i32,
     dpi: u32,
     dark: bool,
+    /// Width budget passed to `Layout::compute`.
+    max_w: i32,
     view: fn(&Layout, &Snapshot) -> ViewState,
 }
 
@@ -214,7 +233,7 @@ fn write_case(
     cfg: &LayoutConfig,
     c: &Case,
 ) -> Result<()> {
-    let layout = Layout::compute(snap, cfg, c.height, c.dpi, i32::MAX);
+    let layout = Layout::compute(snap, cfg, c.height, c.dpi, c.max_w);
     let theme = Theme::from_parts(c.dark, Rgba::from_rgb8(0x00, 0x78, 0xD4));
     let view = (c.view)(&layout, snap);
     let (w, h, px) = r.render_to_bgra(snap, &layout, &view, &theme, cfg)?;
@@ -269,24 +288,46 @@ fn main() -> Result<()> {
 
     let snap = fake_snapshot();
     let cases = [
-        Case { name: "dark_1row", height: 48, dpi: 96, dark: true, view: no_view },
-        Case { name: "light_1row", height: 48, dpi: 96, dark: false, view: no_view },
-        Case { name: "dark_1row_150", height: 72, dpi: 144, dark: true, view: no_view },
-        Case { name: "light_1row_150", height: 72, dpi: 144, dark: false, view: no_view },
-        Case { name: "dark_hover_cell", height: 48, dpi: 96, dark: true, view: hover_cell },
-        Case { name: "dark_hover_window", height: 48, dpi: 96, dark: true, view: hover_window },
-        Case { name: "light_hover_cell", height: 48, dpi: 96, dark: false, view: hover_cell },
-        Case { name: "dark_drag", height: 48, dpi: 96, dark: true, view: drag_view },
-        Case { name: "light_drag", height: 48, dpi: 96, dark: false, view: drag_view },
-        Case { name: "dark_drag_150", height: 72, dpi: 144, dark: true, view: drag_view },
+        Case { name: "dark_1row", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: no_view },
+        Case { name: "light_1row", height: 48, dpi: 96, dark: false, max_w: i32::MAX, view: no_view },
+        Case { name: "dark_1row_150", height: 72, dpi: 144, dark: true, max_w: i32::MAX, view: no_view },
+        Case { name: "light_1row_150", height: 72, dpi: 144, dark: false, max_w: i32::MAX, view: no_view },
+        Case { name: "dark_hover_cell", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: hover_cell },
+        Case { name: "dark_hover_window", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: hover_window },
+        Case { name: "light_hover_cell", height: 48, dpi: 96, dark: false, max_w: i32::MAX, view: hover_cell },
+        Case { name: "dark_drag", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: drag_view },
+        Case { name: "light_drag", height: 48, dpi: 96, dark: false, max_w: i32::MAX, view: drag_view },
+        Case { name: "dark_drag_150", height: 72, dpi: 144, dark: true, max_w: i32::MAX, view: drag_view },
     ];
     for c in &cases {
         let cfg = LayoutConfig::default();
         write_case(&mut r, &out, &snap, &cfg, c)?;
     }
+    // Desktop names (off by default now).
+    let cfg = LayoutConfig { show_names: true, ..Default::default() };
+    let c = Case { name: "dark_names", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: no_view };
+    write_case(&mut r, &out, &snap, &cfg, &c)?;
+    // Overflow: a 680 px budget (the free gap on the dev machine) with more desktops.
+    let cfg = LayoutConfig::default();
+    for dark in [true, false] {
+        let t = if dark { "dark" } else { "light" };
+        let case = |name: &'static str, h, dpi, max_w| Case { name, height: h, dpi, dark, max_w, view: no_view };
+        let n12 = [0usize, 6, 11];
+        for cur in n12 {
+            let name: &'static str = Box::leak(format!("{t}_overflow12_cur{cur}").into_boxed_str());
+            write_case(&mut r, &out, &fake_snapshot_n(12, cur), &cfg, &case(name, 48, 96, 680))?;
+        }
+        let name: &'static str = Box::leak(format!("{t}_overflow9_shrink").into_boxed_str());
+        write_case(&mut r, &out, &fake_snapshot_n(9, 4), &cfg, &case(name, 48, 96, 680))?;
+        let name: &'static str = Box::leak(format!("{t}_overflow12_unlimited").into_boxed_str());
+        write_case(&mut r, &out, &fake_snapshot_n(12, 6), &cfg, &case(name, 48, 96, i32::MAX))?;
+        // 150% DPI: the gap scales too (1020 px).
+        let name: &'static str = Box::leak(format!("{t}_overflow12_cur6_150").into_boxed_str());
+        write_case(&mut r, &out, &fake_snapshot_n(12, 6), &cfg, &case(name, 72, 144, 1020))?;
+    }
     // Option variants: no icons / no names.
     let cfg = LayoutConfig { show_icons: false, show_names: false, ..Default::default() };
-    let c = Case { name: "dark_plain", height: 48, dpi: 96, dark: true, view: no_view };
+    let c = Case { name: "dark_plain", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: no_view };
     write_case(&mut r, &out, &snap, &cfg, &c)?;
     println!("output in {}", std::fs::canonicalize(&out).unwrap_or(out).display());
     Ok(())
