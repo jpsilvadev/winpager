@@ -1718,13 +1718,23 @@ fn update_tooltip(app: &mut App, hover: Option<Hit>) {
             text.push_str(&title);
         }
     }
-    let cell = marker.unwrap_or(app.layout.cells[d]);
-    let cx = app.pager_rect.left + ((cell.left + cell.right) / 2.0) as i32;
+    // Centre on the hovered cell, marker or window outline (clipped to its cell).
+    let mut span = marker.unwrap_or(app.layout.cells[d]);
+    if let Some(wh) = wh
+        && let Some(w) = app.snapshot.windows.iter().find(|w| w.hwnd == wh)
+    {
+        let o = app.layout.map_window(d, &w.rect);
+        let (l, r) = (o.left.max(span.left), o.right.min(span.right));
+        if r > l {
+            span.left = l;
+            span.right = r;
+        }
+    }
+    let cx = app.pager_rect.left + ((span.left + span.right) / 2.0) as i32;
     let gap = (6.0 * app.layout.scale) as i32;
-    let above = app.taskbar.map(|t| t.edge) != Some(taskbar::Edge::Top);
-    let anchor = if above { app.pager_rect.top - gap } else { app.pager_rect.bottom + gap };
+    let pager = app.pager_rect;
     if let Some(t) = app.tooltip.as_mut() {
-        t.show(&text, cx, anchor, above);
+        t.show(&text, cx, &pager, gap);
     }
 }
 
