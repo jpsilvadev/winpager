@@ -12,7 +12,6 @@ use crate::config::Placement;
 pub enum Cmd {
     AddDesktop,
     RemoveDesktop,
-    Rows(u32),
     ShowIcons,
     ShowNames,
     Place(Placement),
@@ -23,7 +22,6 @@ pub enum Cmd {
 
 const ID_ADD: usize = 1;
 const ID_REMOVE: usize = 2;
-const ID_ROWS: usize = 10; // 10..=12 -> rows 1..=3
 const ID_ICONS: usize = 20;
 const ID_NAMES: usize = 21;
 const ID_PLACE_TASKBAR: usize = 30;
@@ -36,7 +34,6 @@ const ID_EXIT: usize = 99;
 pub struct MenuState {
     /// Desktop that "Remove this desktop" would remove, if any.
     pub removable: Option<usize>,
-    pub rows: u32,
     pub show_icons: bool,
     pub show_names: bool,
     pub placement: Placement,
@@ -58,7 +55,6 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
                 return None;
             }
         };
-        let rows_menu = CreatePopupMenu().ok();
         let place_menu = CreatePopupMenu().ok();
 
         let mut ok = true;
@@ -74,20 +70,6 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
         add(menu, remove_fl, ID_REMOVE, w!("Remove this desktop"));
         add(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
-        if let Some(rm) = rows_menu {
-            add(rm, MF_STRING, ID_ROWS, w!("1 row"));
-            add(rm, MF_STRING, ID_ROWS + 1, w!("2 rows"));
-            add(rm, MF_STRING, ID_ROWS + 2, w!("3 rows"));
-            let sel = st.rows.clamp(1, 3) - 1;
-            let _ = CheckMenuRadioItem(
-                rm,
-                ID_ROWS as u32,
-                ID_ROWS as u32 + 2,
-                ID_ROWS as u32 + sel,
-                MF_BYCOMMAND.0,
-            );
-            add(menu, MF_STRING | MF_POPUP, rm.0 as usize, w!("Rows"));
-        }
         add(menu, MF_STRING | flag(st.show_icons), ID_ICONS, w!("Show icons"));
         add(menu, MF_STRING | flag(st.show_names), ID_NAMES, w!("Show names"));
         if let Some(pm) = place_menu {
@@ -130,7 +112,6 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
             0 => None,
             ID_ADD => Some(Cmd::AddDesktop),
             ID_REMOVE => Some(Cmd::RemoveDesktop),
-            i @ ID_ROWS..=12 => Some(Cmd::Rows((i - ID_ROWS) as u32 + 1)),
             ID_ICONS => Some(Cmd::ShowIcons),
             ID_NAMES => Some(Cmd::ShowNames),
             ID_PLACE_TASKBAR => Some(Cmd::Place(Placement::Taskbar)),

@@ -166,7 +166,6 @@ fn compose(px: &[u8], w: u32, h: u32, bg: [u8; 3], pad: u32, k: u32) -> (u32, u3
 
 struct Case<'a> {
     name: &'a str,
-    rows: u32,
     height: i32,
     dpi: u32,
     dark: bool,
@@ -215,7 +214,7 @@ fn write_case(
     cfg: &LayoutConfig,
     c: &Case,
 ) -> Result<()> {
-    let layout = Layout::compute(snap, cfg, c.height, c.dpi);
+    let layout = Layout::compute(snap, cfg, c.height, c.dpi, i32::MAX);
     let theme = Theme::from_parts(c.dark, Rgba::from_rgb8(0x00, 0x78, 0xD4));
     let view = (c.view)(&layout, snap);
     let (w, h, px) = r.render_to_bgra(snap, &layout, &view, &theme, cfg)?;
@@ -256,7 +255,7 @@ fn main() -> Result<()> {
         println!("real snapshot: {} desktops, {} windows", snap.desktops.len(), snap.windows.len());
         let sys = Theme::from_system();
         let cfg = LayoutConfig::default();
-        let layout = Layout::compute(&snap, &cfg, 48, 96);
+        let layout = Layout::compute(&snap, &cfg, 48, 96, i32::MAX);
         let (w, h, px) = r.render_to_bgra(&snap, &layout, &ViewState::default(), &sys, &cfg)?;
         let bg = if sys.dark { [0x1f, 0x1f, 0x1f] } else { [0xee, 0xee, 0xee] };
         for k in [1u32, 3] {
@@ -270,26 +269,24 @@ fn main() -> Result<()> {
 
     let snap = fake_snapshot();
     let cases = [
-        Case { name: "dark_1row", rows: 1, height: 48, dpi: 96, dark: true, view: no_view },
-        Case { name: "light_1row", rows: 1, height: 48, dpi: 96, dark: false, view: no_view },
-        Case { name: "dark_2rows", rows: 2, height: 48, dpi: 96, dark: true, view: no_view },
-        Case { name: "light_2rows", rows: 2, height: 48, dpi: 96, dark: false, view: no_view },
-        Case { name: "dark_1row_150", rows: 1, height: 72, dpi: 144, dark: true, view: no_view },
-        Case { name: "light_1row_150", rows: 1, height: 72, dpi: 144, dark: false, view: no_view },
-        Case { name: "dark_hover_cell", rows: 1, height: 48, dpi: 96, dark: true, view: hover_cell },
-        Case { name: "dark_hover_window", rows: 1, height: 48, dpi: 96, dark: true, view: hover_window },
-        Case { name: "light_hover_cell", rows: 1, height: 48, dpi: 96, dark: false, view: hover_cell },
-        Case { name: "dark_drag", rows: 1, height: 48, dpi: 96, dark: true, view: drag_view },
-        Case { name: "light_drag", rows: 1, height: 48, dpi: 96, dark: false, view: drag_view },
-        Case { name: "dark_drag_150", rows: 1, height: 72, dpi: 144, dark: true, view: drag_view },
+        Case { name: "dark_1row", height: 48, dpi: 96, dark: true, view: no_view },
+        Case { name: "light_1row", height: 48, dpi: 96, dark: false, view: no_view },
+        Case { name: "dark_1row_150", height: 72, dpi: 144, dark: true, view: no_view },
+        Case { name: "light_1row_150", height: 72, dpi: 144, dark: false, view: no_view },
+        Case { name: "dark_hover_cell", height: 48, dpi: 96, dark: true, view: hover_cell },
+        Case { name: "dark_hover_window", height: 48, dpi: 96, dark: true, view: hover_window },
+        Case { name: "light_hover_cell", height: 48, dpi: 96, dark: false, view: hover_cell },
+        Case { name: "dark_drag", height: 48, dpi: 96, dark: true, view: drag_view },
+        Case { name: "light_drag", height: 48, dpi: 96, dark: false, view: drag_view },
+        Case { name: "dark_drag_150", height: 72, dpi: 144, dark: true, view: drag_view },
     ];
     for c in &cases {
-        let cfg = LayoutConfig { rows: c.rows, ..Default::default() };
+        let cfg = LayoutConfig::default();
         write_case(&mut r, &out, &snap, &cfg, c)?;
     }
     // Option variants: no icons / no names.
     let cfg = LayoutConfig { show_icons: false, show_names: false, ..Default::default() };
-    let c = Case { name: "dark_plain", rows: 1, height: 48, dpi: 96, dark: true, view: no_view };
+    let c = Case { name: "dark_plain", height: 48, dpi: 96, dark: true, view: no_view };
     write_case(&mut r, &out, &snap, &cfg, &c)?;
     println!("output in {}", std::fs::canonicalize(&out).unwrap_or(out).display());
     Ok(())
@@ -325,7 +322,7 @@ fn present_test(ms: u32) -> Result<()> {
         RegisterClassW(&wc);
         let snap = fake_snapshot();
         let cfg = LayoutConfig::default();
-        let layout = Layout::compute(&snap, &cfg, 48, 96);
+        let layout = Layout::compute(&snap, &cfg, 48, 96, i32::MAX);
         let (x, y) = (300, 300);
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -347,7 +344,7 @@ fn present_test(ms: u32) -> Result<()> {
             .context("present")?;
         // Present a second time (reuse path) and with a different size (DIB recreation).
         r.present(hwnd, &snap, &layout, &ViewState::default(), &theme, &cfg)?;
-        let l2 = Layout::compute(&snap, &LayoutConfig { rows: 2, ..cfg.clone() }, 48, 96);
+        let l2 = Layout::compute(&snap, &LayoutConfig { ..cfg.clone() }, 48, 96, i32::MAX);
         r.present(hwnd, &snap, &l2, &ViewState::default(), &theme, &cfg)?;
         r.present(hwnd, &snap, &layout, &ViewState::default(), &theme, &cfg)?;
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);

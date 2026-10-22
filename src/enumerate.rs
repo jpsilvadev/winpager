@@ -14,13 +14,14 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::icons::IconCache;
 use crate::model::{Hwnd, RectI, Snapshot, WindowInfo, from_hwnd, to_hwnd};
 
-/// Primary monitor rectangle in physical pixels.
+/// Primary monitor work area (monitor minus taskbar) in physical pixels. Maximized and
+/// snapped windows fill exactly this area, so their outlines fill their cell.
 pub fn primary_screen() -> RectI {
     unsafe {
         let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         if GetMonitorInfoW(mon, &mut mi).as_bool() {
-            let r = mi.rcMonitor;
+            let r = mi.rcWork;
             return RectI { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
         }
         RectI { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) }

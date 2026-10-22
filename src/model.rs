@@ -109,8 +109,8 @@ pub struct Snapshot {
     pub desktops: Vec<DesktopInfo>,
     /// Index into `desktops` of the current desktop.
     pub current: usize,
-    /// Reference screen area (primary monitor rect, physical pixels). Window rects are
-    /// mapped from this area into each desktop cell.
+    /// Reference screen area (primary monitor work area, i.e. without the taskbar, physical
+    /// pixels). Window rects are mapped from this area into each desktop cell.
     pub screen: RectI,
     /// Non-minimized, user-visible top-level windows that intersect `screen`,
     /// in z-order, TOPMOST FIRST.
@@ -131,8 +131,6 @@ impl Snapshot {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LayoutConfig {
-    /// Number of rows in the desktop grid (1 = single strip).
-    pub rows: u32,
     /// Gap between cells.
     pub spacing: f32,
     /// Margin above and below the grid inside the taskbar.
@@ -146,11 +144,10 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            rows: 1,
             spacing: 4.0,
             vertical_margin: 5.0,
             show_icons: true,
-            show_names: true,
+            show_names: false,
         }
     }
 }

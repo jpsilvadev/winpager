@@ -51,21 +51,28 @@ add new public items. Private implementation is yours.
 
 ## Behaviour spec
 
-- Cells: one per desktop, aspect ratio = primary monitor aspect. Grid with `rows` rows,
-  `cols = ceil(n / rows)`, row-major order. Height fills the taskbar minus margins.
+- Cells: a single row, one per desktop, aspect ratio = primary monitor *work area* aspect
+  (windows are mapped from the work area, so maximized/snapped windows fill their cell).
+  Height fills the taskbar minus margins.
+- Space: the pager must never overlap taskbar buttons or the tray. The free span is measured
+  with UI Automation (task buttons: `Taskbar.TaskListButtonAutomationPeer` + Start/Search/
+  TaskView buttons; tray: first `SystemTray.*` element). When the natural width exceeds the
+  free span, cells shrink uniformly (keeping aspect) down to a minimum size; beyond that, a
+  sliding window of desktops containing the current one is shown, with overflow markers at
+  the edge(s) where desktops are hidden. Scrolling still reaches every desktop.
 - Windows: drawn bottom-to-top (snapshot is topmost-first), clipped to their cell,
   filled + 1 px border; the foreground window is emphasised; icon centered when the
   outline is big enough. Pinned windows appear in every cell.
 - Current desktop: accent-colored highlight. Hovered cell: subtle highlight.
-- Desktop name/number drawn faintly behind windows when `show_names`.
+- Desktop name/number drawn faintly behind windows when `show_names` (default off), only
+  where no window covers it.
 - Click (press+release without moving beyond the drag threshold) on a cell → switch.
-- Wheel over the pager → next/previous desktop (wrap configurable, invert configurable).
+- Wheel over the pager → next/previous desktop (wrap configurable, default off, invert configurable).
   Accumulate wheel deltas (precision touchpads send small deltas).
 - Drag a window outline to another cell → move that window to that desktop. While dragging
   draw the outline following the cursor and highlight the target cell.
 - Tooltip on hover: desktop name, plus the hovered window's title.
-- Right-click menu: Add desktop, Remove this desktop (confirm if it has windows), Rows
-  (1/2/3), Show icons, Show names, Placement (Taskbar / Floating), Start with Windows
+- Right-click menu: Add desktop, Remove this desktop (confirm if it has windows), Show icons, Show names, Placement (Taskbar / Floating), Start with Windows
   (HKCU Run key), Open config file, Exit.
 - Live updates: winvd events + `SetWinEventHook` (create/destroy/show/hide/location/
   name/foreground/minimize/cloak) coalesced with a ~30 ms timer. Ignore events for

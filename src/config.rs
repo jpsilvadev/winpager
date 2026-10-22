@@ -41,7 +41,7 @@ impl Default for Config {
             placement: Placement::Taskbar,
             anchor: Anchor::Tray,
             offset: 8,
-            wrap_scroll: true,
+            wrap_scroll: false,
             invert_scroll: false,
         }
     }
@@ -81,7 +81,6 @@ impl Config {
 
     /// Clamp values to sane ranges.
     fn sanitized(mut self) -> Config {
-        self.layout.rows = self.layout.rows.clamp(1, 8);
         self.layout.spacing = self.layout.spacing.clamp(0.0, 64.0);
         self.layout.vertical_margin = self.layout.vertical_margin.clamp(0.0, 64.0);
         self.offset = self.offset.clamp(-4000, 4000);

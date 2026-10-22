@@ -531,7 +531,7 @@ fn relayout(app: &mut App) {
         Some(tb) => (tb.rect.height().max(16), tb.dpi),
         None => (48, 96),
     };
-    app.layout = Layout::compute(&app.snapshot, &app.cfg.layout, height, dpi);
+    app.layout = Layout::compute(&app.snapshot, &app.cfg.layout, height, dpi, i32::MAX);
     let n = app.snapshot.desktops.len();
     // Drop view state that refers to desktops/windows that no longer exist.
     if let Some(Hit::Desktop(d) | Hit::Window { desktop: d, .. }) = app.view.hover
@@ -1352,7 +1352,6 @@ fn show_context_menu(pager: HWND, x: i32, y: i32) {
         let removable = if app.snapshot.desktops.len() > 1 { target } else { None };
         let st = MenuState {
             removable,
-            rows: app.cfg.layout.rows,
             show_icons: app.cfg.layout.show_icons,
             show_names: app.cfg.layout.show_names,
             placement: app.cfg.placement,
@@ -1411,14 +1410,6 @@ fn handle_command(owner: HWND, cmd: Cmd, target: Option<usize>) {
                 crate::wlog!("vd::remove({idx}) failed: {e:#}");
             }
             with_app(refresh);
-        }
-        Cmd::Rows(n) => {
-            with_app(|app| {
-                app.cfg.layout.rows = n.clamp(1, 3);
-                save_config(app);
-                relayout(app);
-                present(app);
-            });
         }
         Cmd::ShowIcons => {
             with_app(|app| {

@@ -10,26 +10,45 @@ pub struct Layout {
     /// dpi / 96.
     pub scale: f32,
     /// One rect per desktop, same order as `Snapshot::desktops`. Edges are whole pixels.
+    /// Desktops outside `visible` have an empty rect (never drawn, never hit).
     pub cells: Vec<RectF>,
+    /// Desktop indices that are shown; all of them unless `max_width_px` is too small.
+    pub visible: std::ops::Range<usize>,
     /// Copy of `Snapshot::screen` used for mapping.
     pub screen: RectI,
 }
 
 impl Layout {
-    /// Compute the grid for `height_px` of available height. Width follows from the
-    /// desktop count, `cfg.rows`, and the screen aspect ratio.
+    /// Compute a single-row strip for `height_px` of available height. Width follows from
+    /// the desktop count and the screen aspect ratio, but never exceeds `max_width_px`
+    /// (pass `i32::MAX` for no limit).
     ///
-    /// Cells are row-major, snapped to whole pixels, all the same size, and the grid is
-    /// vertically centered. `width` is the exact content width (no trailing gap).
-    pub fn compute(snapshot: &Snapshot, cfg: &LayoutConfig, height_px: i32, dpi: u32) -> Layout {
+    /// Cells are snapped to whole pixels, all the same size, and vertically centered.
+    /// `width` is the exact content width (no trailing gap).
+    pub fn compute(
+        snapshot: &Snapshot,
+        cfg: &LayoutConfig,
+        height_px: i32,
+        dpi: u32,
+        max_width_px: i32,
+    ) -> Layout {
+        // STUB: `max_width_px` is not honoured yet.
+        let _ = max_width_px;
         let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
         let height = height_px.max(1);
         let n = snapshot.desktops.len();
         if n == 0 {
-            return Layout { width: 0, height, scale, cells: Vec::new(), screen: snapshot.screen };
+            return Layout {
+                width: 0,
+                height,
+                scale,
+                cells: Vec::new(),
+                visible: 0..0,
+                screen: snapshot.screen,
+            };
         }
 
-        let rows = (cfg.rows.max(1) as usize).min(n);
+        let rows = 1usize;
         let cols = n.div_ceil(rows);
 
         let margin = (cfg.vertical_margin.max(0.0) * scale).round() as i32;
@@ -65,6 +84,7 @@ impl Layout {
             height,
             scale,
             cells,
+            visible: 0..n,
             screen: snapshot.screen,
         }
     }
@@ -145,7 +165,7 @@ mod tests {
     fn one_row_48px() {
         let s = snap(7, vec![]);
         let cfg = LayoutConfig::default();
-        let l = Layout::compute(&s, &cfg, 48, 96);
+        let l = Layout::compute(&s, &cfg, 48, 96, i32::MAX);
         assert_eq!(l.cells.len(), 7);
         assert_eq!(l.height, 48);
         let c0 = l.cells[0];
@@ -163,36 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn two_rows_odd_count() {
-        let s = snap(7, vec![]);
-        let cfg = LayoutConfig { rows: 2, ..Default::default() };
-        let l = Layout::compute(&s, &cfg, 48, 96);
-        // cols = 4: row 0 holds 0..4, row 1 holds 4..7.
-        let ch = l.cells[0].height();
-        assert_eq!(ch, ((48.0 - 10.0 - 4.0) / 2.0f32).floor());
-        assert_eq!(l.cells[4].left, 0.0);
-        assert!(l.cells[4].top > l.cells[0].bottom);
-        assert_eq!(l.cells[3].top, l.cells[0].top);
-        assert_eq!(l.width as f32, l.cells[3].right);
-        assert!(l.cells.iter().all(|c| c.bottom <= 48.0 && c.top >= 0.0));
-    }
-
-    #[test]
-    fn rows_clamped() {
-        let s = snap(3, vec![]);
-        let cfg = LayoutConfig { rows: 10, ..Default::default() };
-        let l = Layout::compute(&s, &cfg, 120, 96);
-        // 3 rows of 1 column.
-        assert!(l.cells.iter().all(|c| c.left == 0.0));
-        let cfg0 = LayoutConfig { rows: 0, ..Default::default() };
-        let l0 = Layout::compute(&s, &cfg0, 48, 96);
-        assert_eq!(l0.cells[0].top, l0.cells[2].top);
-    }
-
-    #[test]
     fn scaled_72px() {
         let s = snap(7, vec![]);
-        let l = Layout::compute(&s, &LayoutConfig::default(), 72, 144);
+        let l = Layout::compute(&s, &LayoutConfig::default(), 72, 144, i32::MAX);
         assert_eq!(l.scale, 1.5);
         // margin 7.5 -> 8, ch = 72 - 16 = 56
         assert_eq!(l.cells[0].height(), 56.0);
@@ -202,28 +195,25 @@ mod tests {
     #[test]
     fn degenerate() {
         let s0 = snap(0, vec![]);
-        let l = Layout::compute(&s0, &LayoutConfig::default(), 48, 96);
+        let l = Layout::compute(&s0, &LayoutConfig::default(), 48, 96, i32::MAX);
         assert!(l.cells.is_empty());
         assert_eq!(l.width, 0);
         assert_eq!(l.hit_test(&s0, 1.0, 1.0), Hit::None);
 
         for h in [-5, 0, 1, 3, 10] {
-            for rows in [1, 2, 3] {
-                let s = snap(5, vec![]);
-                let cfg = LayoutConfig { rows, ..Default::default() };
-                let l = Layout::compute(&s, &cfg, h, 96);
-                assert_eq!(l.cells.len(), 5);
-                assert!(l.width > 0 && l.height > 0);
-                for c in &l.cells {
-                    assert!(c.width() >= 1.0 && c.height() >= 1.0);
-                    assert!(c.left.is_finite() && c.top.is_finite());
-                }
+            let s = snap(5, vec![]);
+            let l = Layout::compute(&s, &LayoutConfig::default(), h, 96, i32::MAX);
+            assert_eq!(l.cells.len(), 5);
+            assert!(l.width > 0 && l.height > 0);
+            for c in &l.cells {
+                assert!(c.width() >= 1.0 && c.height() >= 1.0);
+                assert!(c.left.is_finite() && c.top.is_finite());
             }
         }
         // Zero-sized screen and zero dpi must not produce NaN.
         let mut s = snap(2, vec![]);
         s.screen = RectI::default();
-        let l = Layout::compute(&s, &LayoutConfig::default(), 48, 0);
+        let l = Layout::compute(&s, &LayoutConfig::default(), 48, 0, i32::MAX);
         assert!(l.cells.iter().all(|c| c.width().is_finite()));
         let r = l.map_window(0, &RectI { left: 0, top: 0, right: 10, bottom: 10 });
         assert!(r.right.is_finite());
@@ -240,7 +230,7 @@ mod tests {
             win(4, Some(1), [0, 0, 3440, 1440]),
         ];
         let s = snap(3, ws);
-        let l = Layout::compute(&s, &LayoutConfig::default(), 48, 96);
+        let l = Layout::compute(&s, &LayoutConfig::default(), 48, 96, i32::MAX);
         let c0 = l.cells[0];
         let left = (c0.left + 2.0, c0.top + 10.0);
         let right = (c0.right - 2.0, c0.top + 10.0);
@@ -270,7 +260,7 @@ mod tests {
     fn offscreen_window_is_clipped_for_hits() {
         // A window hanging far to the right of desktop 0 must not capture clicks in cell 1.
         let s = snap(2, vec![win(9, Some(0), [3000, 0, 6000, 1440])]);
-        let l = Layout::compute(&s, &LayoutConfig::default(), 48, 96);
+        let l = Layout::compute(&s, &LayoutConfig::default(), 48, 96, i32::MAX);
         let c1 = l.cells[1];
         assert_eq!(l.hit_test(&s, c1.left + 3.0, c1.top + 3.0), Hit::Desktop(1));
     }
