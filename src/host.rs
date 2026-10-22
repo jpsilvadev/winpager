@@ -33,13 +33,14 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
-use crate::config::{Config, Placement};
+use crate::config::{Anchor, Config, Placement};
 use crate::icons::IconCache;
 use crate::layout::Layout;
 use crate::menu::{self, Cmd, MenuState};
 use crate::model::*;
 use crate::render::Renderer;
 use crate::taskbar::{self, TaskbarInfo};
+use crate::taskbar_space::{self, Space, SpaceMonitor};
 use crate::theme::Theme;
 use crate::tooltip::Tooltip;
 use crate::vd;
@@ -53,6 +54,8 @@ const WM_APP_VD: u32 = WM_APP + 1;
 /// Posted by the low-level mouse hook to the pager. wParam = wheel delta (i16 as isize),
 /// lParam = 1 for the horizontal wheel.
 const WM_APP_WHEEL: u32 = WM_APP + 2;
+/// Posted by the UIA thread (`taskbar_space`) to the control window when the free span changed.
+const WM_APP_SPACE: u32 = WM_APP + 3;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_POLL: usize = 2;
@@ -63,6 +66,8 @@ const REFRESH_DELAY_MS: u32 = 30;
 const POLL_MS: u32 = 1000;
 const VERIFY_MS: u32 = 600;
 
+/// Clearance kept between the pager and neighbouring taskbar elements (DIPs).
+const SPAN_GAP_DIP: i32 = 8;
 const TASKBAR_BRIDGE_CLASS: &str = "Windows.UI.Composition.DesktopWindowContentBridge";
 
 static CONTROL_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -122,6 +127,10 @@ struct App {
     /// Test aid (`WINPAGER_TEST_NO_LEAVE=1`): ignore WM_MOUSELEAVE, so hover state produced by
     /// posted (synthetic) mouse messages is not immediately cleared by the system's leave.
     ignore_leave: bool,
+    /// UI Automation measurement of the taskbar (background thread); `space` is its latest result.
+    space_monitor: Option<SpaceMonitor>,
+    space: Option<Space>,
+    last_max_width: (i32, i32),
 }
 
 // ---------------------------------------------------------------------------------------
@@ -223,6 +232,9 @@ fn run_inner(cfg: Config) -> anyhow::Result<()> {
             config_mtime: config_mtime(),
             verified_blocked_once: false,
             ignore_leave: std::env::var_os("WINPAGER_TEST_NO_LEAVE").is_some(),
+            space_monitor: None,
+            space: None,
+            last_max_width: (-1, -1),
         };
         APP.with(|c| *c.borrow_mut() = Some(app));
 
@@ -236,6 +248,7 @@ fn run_inner(cfg: Config) -> anyhow::Result<()> {
                 }
             };
             install_win_event_hooks(app);
+            start_space_monitor(app);
             rebuild_pager(app);
             SetTimer(app.control, TIMER_POLL, POLL_MS, None);
         });
@@ -284,6 +297,7 @@ fn shutdown(app: &mut App) {
             let _ = UnhookWinEvent(h);
         }
         app.listener = None;
+        app.space_monitor = None; // stops and joins the UIA thread
         app.tooltip = None;
         let _ = KillTimer(app.control, TIMER_POLL);
         let _ = KillTimer(app.control, TIMER_REFRESH);
@@ -351,7 +365,7 @@ fn rebuild_pager(app: &mut App) {
 
     let mut created = None;
     if embedded(app) {
-        let rect = taskbar::pager_rect(&tb, app.cfg.anchor, app.cfg.offset, app.layout.width.max(1));
+        let rect = pager_screen_rect(app, &tb, app.layout.width);
         match create_pager_window(&tb, rect, true) {
             Ok(h) => {
                 created = Some((h, rect));
@@ -364,7 +378,7 @@ fn rebuild_pager(app: &mut App) {
         }
     }
     if created.is_none() {
-        let rect = taskbar::pager_rect(&tb, app.cfg.anchor, app.cfg.offset, app.layout.width.max(1));
+        let rect = pager_screen_rect(app, &tb, app.layout.width);
         match create_pager_window(&tb, rect, false) {
             Ok(h) => created = Some((h, rect)),
             Err(e) => crate::wlog!("floating pager creation failed: {e:#}"),
@@ -375,7 +389,6 @@ fn rebuild_pager(app: &mut App) {
     PAGER_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
     app.pager_rect = rect;
     store_pager_rect(&rect);
-    log_overlap(app, &rect);
     apply_geometry(app, true);
     present(app);
     if embedded(app) {
@@ -433,11 +446,51 @@ fn store_pager_rect(r: &RectI) {
     PAGER_RECT[3].store(r.bottom, Ordering::Relaxed);
 }
 
-fn log_overlap(app: &App, rect: &RectI) {
-    if let Some(tb) = &app.taskbar
-        && taskbar::overlaps_task_buttons(tb, rect)
-    {
-        crate::wlog!("warning: pager {:?} overlaps the task button area {:?}", rect, tb.rebar);
+fn start_space_monitor(app: &mut App) {
+    if std::env::var_os("WINPAGER_TEST_NO_UIA").is_some() {
+        crate::wlog!("taskbar_space: disabled by WINPAGER_TEST_NO_UIA; using the TrayNotifyWnd fallback");
+        return;
+    }
+    let m = SpaceMonitor::start(from_hwnd(app.control), WM_APP_SPACE);
+    // Wait briefly for the first measurement so the pager is not first placed with the
+    // fallback geometry and then moved.
+    for _ in 0..40 {
+        if m.current().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.space = m.current();
+    if app.space.is_none() {
+        crate::wlog!("taskbar_space: no UIA measurement yet; using the TrayNotifyWnd fallback");
+    }
+    app.space_monitor = Some(m);
+}
+
+/// Screen-x range (`left..right`) the pager may occupy, or `None` when UI Automation could
+/// not measure the taskbar (then the `TrayNotifyWnd` fallback applies, with no width limit).
+fn current_span(app: &App) -> Option<(i32, i32)> {
+    let tb = app.taskbar?;
+    let space = app.space?;
+    let scale = |v: i32| v * tb.dpi as i32 / 96;
+    Some(taskbar_space::free_span(
+        app.cfg.anchor == Anchor::Tray,
+        &space,
+        (tb.rect.left, tb.rect.right),
+        scale(SPAN_GAP_DIP),
+        scale(app.cfg.offset),
+    ))
+}
+
+/// Screen rect for a pager `width` pixels wide.
+fn pager_screen_rect(app: &App, tb: &TaskbarInfo, width: i32) -> RectI {
+    let width = width.max(1);
+    match current_span(app) {
+        Some(span) => {
+            let (l, r) = taskbar_space::place_in_span(app.cfg.anchor == Anchor::Tray, span, width);
+            RectI { left: l, top: tb.rect.top, right: r, bottom: tb.rect.bottom }
+        }
+        None => taskbar::pager_rect(tb, app.cfg.anchor, app.cfg.offset, width),
     }
 }
 
@@ -447,12 +500,9 @@ fn apply_geometry(app: &mut App, force: bool) {
     if app.pager.is_invalid() {
         return;
     }
-    let rect = taskbar::pager_rect(&tb, app.cfg.anchor, app.cfg.offset, app.layout.width.max(1));
+    let rect = pager_screen_rect(app, &tb, app.layout.width);
     if !force && rect == app.pager_rect {
         return;
-    }
-    if rect != app.pager_rect {
-        log_overlap(app, &rect);
     }
     app.pager_rect = rect;
     store_pager_rect(&rect);
@@ -531,7 +581,18 @@ fn relayout(app: &mut App) {
         Some(tb) => (tb.rect.height().max(16), tb.dpi),
         None => (48, 96),
     };
-    app.layout = Layout::compute(&app.snapshot, &app.cfg.layout, height, dpi, i32::MAX);
+    let max_width = current_span(app).map_or(i32::MAX, |(l, r)| (r - l).max(0));
+    app.layout = Layout::compute(&app.snapshot, &app.cfg.layout, height, dpi, max_width);
+    if (max_width, app.layout.width) != app.last_max_width {
+        app.last_max_width = (max_width, app.layout.width);
+        crate::wlog!(
+            "layout: max_width_px = {} (span {:?}), layout width = {}, visible desktops {:?}",
+            if max_width == i32::MAX { "unlimited".to_string() } else { max_width.to_string() },
+            current_span(app),
+            app.layout.width,
+            app.layout.visible
+        );
+    }
     let n = app.snapshot.desktops.len();
     // Drop view state that refers to desktops/windows that no longer exist.
     if let Some(Hit::Desktop(d) | Hit::Window { desktop: d, .. }) = app.view.hover
@@ -924,6 +985,18 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                 arm_refresh();
                 LRESULT(0)
             }
+            WM_APP_SPACE => {
+                with_app(|app| {
+                    let new = app.space_monitor.as_ref().and_then(|m| m.current());
+                    if new.is_none() && app.space.is_some() {
+                        crate::wlog!("taskbar_space: UIA unavailable; falling back to TrayNotifyWnd placement");
+                    }
+                    app.space = new;
+                    relayout(app);
+                    present(app);
+                });
+                LRESULT(0)
+            }
             WM_SETTINGCHANGE => {
                 let what = if lparam.0 != 0 {
                     PCWSTR(lparam.0 as *const u16).to_string().unwrap_or_default()
@@ -967,6 +1040,9 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                 if msg == taskbar_created_msg() {
                     crate::wlog!("TaskbarCreated: re-finding taskbar and rebuilding pager");
                     if with_app(|app| {
+                        if let Some(m) = &app.space_monitor {
+                            m.request_refresh();
+                        }
                         app.taskbar = None;
                         app.verified_blocked_once = false;
                         rebuild_pager(app);
@@ -1273,22 +1349,6 @@ fn wheel_target(cur: i32, n: i32, steps: i32, wrap: bool) -> i32 {
     if wrap { (cur + steps).rem_euclid(n) } else { (cur + steps).clamp(0, n - 1) }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::wheel_target;
-
-    #[test]
-    fn wheel_wraps_or_clamps() {
-        assert_eq!(wheel_target(6, 7, 1, true), 0);
-        assert_eq!(wheel_target(0, 7, -1, true), 6);
-        assert_eq!(wheel_target(6, 7, 1, false), 6);
-        assert_eq!(wheel_target(0, 7, -1, false), 0);
-        assert_eq!(wheel_target(2, 7, 3, false), 5);
-        assert_eq!(wheel_target(2, 7, -9, true), 0);
-    }
-}
-
-// ---------------------------------------------------------------------------------------
 // Tooltip
 // ---------------------------------------------------------------------------------------
 
@@ -1469,3 +1529,19 @@ fn open_config() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::wheel_target;
+
+    #[test]
+    fn wheel_wraps_or_clamps() {
+        assert_eq!(wheel_target(6, 7, 1, true), 0);
+        assert_eq!(wheel_target(0, 7, -1, true), 6);
+        assert_eq!(wheel_target(6, 7, 1, false), 6);
+        assert_eq!(wheel_target(0, 7, -1, false), 0);
+        assert_eq!(wheel_target(2, 7, 3, false), 5);
+        assert_eq!(wheel_target(2, 7, -9, true), 0);
+    }
+}
+
