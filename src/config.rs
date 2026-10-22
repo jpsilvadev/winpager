@@ -48,12 +48,55 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load from disk; defaults on missing or invalid file.
+    /// `%APPDATA%\winpager\config.toml` (override with the `WINPAGER_CONFIG` env var, for tests).
+    pub fn path() -> Option<std::path::PathBuf> {
+        if let Some(p) = std::env::var_os("WINPAGER_CONFIG") {
+            return Some(std::path::PathBuf::from(p));
+        }
+        let base = std::env::var_os("APPDATA")?;
+        Some(std::path::PathBuf::from(base).join("winpager").join("config.toml"))
+    }
+
+    /// Load from disk; defaults on missing or invalid file (errors are logged).
     pub fn load() -> Config {
-        Config::default()
+        let Some(path) = Config::path() else {
+            crate::wlog!("config: %APPDATA% not set, using defaults");
+            return Config::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match toml::from_str::<Config>(&text) {
+                Ok(c) => c.sanitized(),
+                Err(e) => {
+                    crate::wlog!("config: invalid {}: {e}; using defaults", path.display());
+                    Config::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => {
+                crate::wlog!("config: cannot read {}: {e}; using defaults", path.display());
+                Config::default()
+            }
+        }
+    }
+
+    /// Clamp values to sane ranges.
+    fn sanitized(mut self) -> Config {
+        self.layout.rows = self.layout.rows.clamp(1, 8);
+        self.layout.spacing = self.layout.spacing.clamp(0.0, 64.0);
+        self.layout.vertical_margin = self.layout.vertical_margin.clamp(0.0, 64.0);
+        self.offset = self.offset.clamp(-4000, 4000);
+        self
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        todo!()
+        use anyhow::Context;
+        let path = Config::path().context("%APPDATA% is not set")?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let text = toml::to_string_pretty(self).context("serializing config")?;
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
     }
 }
