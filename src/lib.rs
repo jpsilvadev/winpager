@@ -10,6 +10,7 @@ pub mod menu;
 pub mod model;
 pub mod render;
 pub mod taskbar;
+pub mod taskbar_space;
 pub mod theme;
 pub mod tooltip;
 pub mod vd;

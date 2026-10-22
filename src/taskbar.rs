@@ -22,7 +22,6 @@ pub struct TaskbarInfo {
     pub hwnd: isize,
     pub rect: RectI,
     pub notify: Option<RectI>,
-    pub rebar: Option<RectI>,
     pub dpi: u32,
     pub edge: Edge,
 }
@@ -68,7 +67,6 @@ pub fn find() -> Option<TaskbarInfo> {
             window_rect(h).filter(|r| r.width() > 0 && r.height() > 0)
         };
         let notify = child(w!("TrayNotifyWnd"));
-        let rebar = child(w!("ReBarWindow32"));
         let mut dpi = GetDpiForWindow(tray);
         if dpi == 0 {
             dpi = 96;
@@ -81,7 +79,7 @@ pub fn find() -> Option<TaskbarInfo> {
         } else {
             Edge::Bottom
         };
-        Some(TaskbarInfo { hwnd: from_hwnd(tray), rect, notify, rebar, dpi, edge })
+        Some(TaskbarInfo { hwnd: from_hwnd(tray), rect, notify, dpi, edge })
     }
 }
 
@@ -98,11 +96,6 @@ pub fn pager_rect(info: &TaskbarInfo, anchor: Anchor, offset_dip: i32, width_px:
     // Never leave the taskbar horizontally.
     let left = left.clamp(info.rect.left, (info.rect.right - width_px).max(info.rect.left));
     RectI { left, top: info.rect.top, right: left + width_px, bottom: info.rect.bottom }
-}
-
-/// True when `pager` covers part of the task-button area (informational only).
-pub fn overlaps_task_buttons(info: &TaskbarInfo, pager: &RectI) -> bool {
-    info.rebar.is_some_and(|r| r.intersects(pager))
 }
 
 /// Screen rect -> client rect of `parent`.
