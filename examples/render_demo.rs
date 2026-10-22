@@ -206,6 +206,20 @@ fn hover_window(l: &Layout, s: &Snapshot) -> ViewState {
     ViewState { hover: Some(hit), drag: None }
 }
 
+fn hover_marker_left(l: &Layout, s: &Snapshot) -> ViewState {
+    let m = l.overflow_left.expect("left marker");
+    let hit = l.hit_test(s, m.left + m.width() * 0.5, m.top + m.height() * 0.5);
+    assert_eq!(hit, Hit::Overflow { forward: false });
+    ViewState { hover: Some(hit), drag: None }
+}
+
+fn hover_marker_right(l: &Layout, s: &Snapshot) -> ViewState {
+    let m = l.overflow_right.expect("right marker");
+    let hit = l.hit_test(s, m.left + m.width() * 0.5, m.top + m.height() * 0.5);
+    assert_eq!(hit, Hit::Overflow { forward: true });
+    ViewState { hover: Some(hit), drag: None }
+}
+
 fn drag_view(l: &Layout, s: &Snapshot) -> ViewState {
     // Dragging the left half tile of the current desktop (index 4) towards desktop 6.
     let src = l.cells[4];
@@ -316,6 +330,12 @@ fn main() -> Result<()> {
         for cur in n12 {
             let name: &'static str = Box::leak(format!("{t}_overflow12_cur{cur}").into_boxed_str());
             write_case(&mut r, &out, &fake_snapshot_n(12, cur), &cfg, &case(name, 48, 96, 680))?;
+        }
+        // Hovered overflow markers (current in the middle: both markers exist).
+        for (suffix, view) in [("left", hover_marker_left as fn(&Layout, &Snapshot) -> ViewState), ("right", hover_marker_right)] {
+            let name: &'static str = Box::leak(format!("{t}_overflow12_hover_{suffix}").into_boxed_str());
+            let c = Case { name, height: 48, dpi: 96, dark, max_w: 680, view };
+            write_case(&mut r, &out, &fake_snapshot_n(12, 6), &cfg, &c)?;
         }
         let name: &'static str = Box::leak(format!("{t}_overflow9_shrink").into_boxed_str());
         write_case(&mut r, &out, &fake_snapshot_n(9, 4), &cfg, &case(name, 48, 96, 680))?;

@@ -160,6 +160,9 @@ pub enum Hit {
     Desktop(usize),
     /// A window outline (topmost one under the point) inside a desktop cell.
     Window { desktop: usize, hwnd: Hwnd },
+    /// An overflow marker (shown when desktops are hidden by the sliding window).
+    /// `forward == false` is the left marker (hidden desktops before the visible range).
+    Overflow { forward: bool },
 }
 
 /// Transient UI state the host passes to the renderer.

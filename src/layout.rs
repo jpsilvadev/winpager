@@ -21,10 +21,10 @@ pub struct Layout {
     /// Desktop indices that are shown; all of them unless `max_width_px` is too small.
     pub visible: std::ops::Range<usize>,
     /// Slim region left of the first visible cell when desktops before `visible` are hidden.
-    /// Purely visual: hit tests return `Hit::None` there.
+    /// Hit tests return `Hit::Overflow { forward: .. }` there.
     pub overflow_left: Option<RectF>,
     /// Slim region right of the last visible cell when desktops after `visible` are hidden.
-    /// Purely visual: hit tests return `Hit::None` there.
+    /// Hit tests return `Hit::Overflow { forward: .. }` there.
     pub overflow_right: Option<RectF>,
     /// Copy of `Snapshot::screen` used for mapping.
     pub screen: RectI,
@@ -185,8 +185,14 @@ impl Layout {
     }
 
     /// What is under a client point: topmost window outline (clipped to its cell) first,
-    /// else the cell. Overflow markers and gaps are `Hit::None`.
+    /// else the cell. Overflow markers give `Hit::Overflow`; gaps are `Hit::None`.
     pub fn hit_test(&self, snapshot: &Snapshot, x: f32, y: f32) -> Hit {
+        if self.overflow_left.is_some_and(|r| r.contains(x, y)) {
+            return Hit::Overflow { forward: false };
+        }
+        if self.overflow_right.is_some_and(|r| r.contains(x, y)) {
+            return Hit::Overflow { forward: true };
+        }
         let Some(d) = self.desktop_at(x, y) else { return Hit::None };
         // The point is already inside cell `d`, so the unclipped outline test is equivalent
         // to testing the outline clipped to the cell.
@@ -340,7 +346,10 @@ mod tests {
             assert_eq!(l.cells[i], RectF::default());
         }
         assert_eq!(l.desktop_at(r.left + 1.0, r.top + 3.0), None);
-        assert_eq!(l.hit_test(&s, r.left + 1.0, r.top + 3.0), Hit::None);
+        assert_eq!(l.hit_test(&s, r.left + 1.0, r.top + 3.0), Hit::Overflow { forward: true });
+        // Just outside the marker (in the gap before it) is nothing.
+        assert_eq!(l.hit_test(&s, r.left - 0.5, r.top + 3.0), Hit::None);
+        assert_eq!(l.hit_test(&s, r.right, r.top + 3.0), Hit::None);
     }
 
     #[test]
@@ -359,7 +368,8 @@ mod tests {
         let (before, after) = (6 - l.visible.start, l.visible.end - 1 - 6);
         assert!(before.abs_diff(after) <= 1);
         assert_eq!(l.desktop_at(a.left + 1.0, a.top + 3.0), None);
-        assert_eq!(l.hit_test(&s, b.left + 1.0, b.top + 3.0), Hit::None);
+        assert_eq!(l.hit_test(&s, b.left + 1.0, b.top + 3.0), Hit::Overflow { forward: true });
+        assert_eq!(l.hit_test(&s, a.left + 1.0, a.top + 3.0), Hit::Overflow { forward: false });
     }
 
     #[test]

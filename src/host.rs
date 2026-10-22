@@ -586,19 +586,28 @@ fn relayout(app: &mut App) {
     if (max_width, app.layout.width) != app.last_max_width {
         app.last_max_width = (max_width, app.layout.width);
         crate::wlog!(
-            "layout: max_width_px = {} (span {:?}), layout width = {}, visible desktops {:?}",
+            "layout: max_width_px = {} (span {:?}), layout width = {}, visible desktops {:?}, markers L {:?} R {:?}",
             if max_width == i32::MAX { "unlimited".to_string() } else { max_width.to_string() },
             current_span(app),
             app.layout.width,
-            app.layout.visible
+            app.layout.visible,
+            app.layout.overflow_left,
+            app.layout.overflow_right
         );
     }
     let n = app.snapshot.desktops.len();
     // Drop view state that refers to desktops/windows that no longer exist.
-    if let Some(Hit::Desktop(d) | Hit::Window { desktop: d, .. }) = app.view.hover
-        && d >= n
-    {
-        app.view.hover = None;
+    match app.view.hover {
+        Some(Hit::Desktop(d) | Hit::Window { desktop: d, .. }) if d >= n || !app.layout.visible.contains(&d) => {
+            app.view.hover = None;
+        }
+        Some(Hit::Overflow { forward }) => {
+            let present = if forward { app.layout.overflow_right } else { app.layout.overflow_left };
+            if present.is_none() {
+                app.view.hover = None;
+            }
+        }
+        _ => {}
     }
     if let Some(drag) = app.view.drag {
         let alive = drag.source_desktop < n && app.snapshot.windows.iter().any(|w| w.hwnd == drag.hwnd);
@@ -1085,7 +1094,7 @@ fn lparam_xy(lp: LPARAM) -> (i32, i32) {
 
 fn hit_desktop(h: Hit) -> Option<usize> {
     match h {
-        Hit::None => None,
+        Hit::None | Hit::Overflow { .. } => None,
         Hit::Desktop(d) | Hit::Window { desktop: d, .. } => Some(d),
     }
 }
@@ -1299,11 +1308,25 @@ fn on_button_up(app: &mut App, x: i32, y: i32, press: Option<Press>, drag: Optio
         present(app);
         return;
     }
+    // Click on an overflow marker: switch to the nearest hidden desktop on that side.
+    if let Hit::Overflow { forward } = press.hit {
+        if app.layout.hit_test(&app.snapshot, fx, fy) == press.hit
+            && let Some(target) = overflow_target(&app.layout.visible, forward)
+        {
+            switch_to(app, target);
+        }
+        return;
+    }
     if let (Some(pd), Some(rd)) = (hit_desktop(press.hit), released_on)
         && pd == rd
     {
         switch_to(app, rd);
     }
+}
+
+/// Nearest hidden desktop on the given side of the visible range.
+fn overflow_target(visible: &std::ops::Range<usize>, forward: bool) -> Option<usize> {
+    if forward { Some(visible.end) } else { visible.start.checked_sub(1) }
 }
 
 fn switch_to(app: &mut App, index: usize) {
@@ -1316,6 +1339,7 @@ fn switch_to(app: &mut App, index: usize) {
     }
     // Immediate feedback; the real state arrives with the next refresh.
     app.snapshot.current = index;
+    relayout(app); // the sliding window may have to follow the new current desktop
     present(app);
 }
 
@@ -1361,9 +1385,22 @@ fn update_tooltip(app: &mut App, hover: Option<Hit>) {
         hide_tooltip(app);
         return;
     };
-    let (d, wh) = match hit {
-        Hit::Desktop(d) => (d, None),
-        Hit::Window { desktop, hwnd } => (desktop, Some(hwnd)),
+    let (d, wh, marker) = match hit {
+        Hit::Desktop(d) => (d, None, None),
+        Hit::Window { desktop, hwnd } => (desktop, Some(hwnd), None),
+        Hit::Overflow { forward } => {
+            // Names the desktop a click would switch to.
+            match overflow_target(&app.layout.visible, forward) {
+                Some(t) if t < app.snapshot.desktops.len() => {
+                    let m = if forward { app.layout.overflow_right } else { app.layout.overflow_left };
+                    (t, None, m)
+                }
+                _ => {
+                    hide_tooltip(app);
+                    return;
+                }
+            }
+        }
         Hit::None => {
             hide_tooltip(app);
             return;
@@ -1380,7 +1417,7 @@ fn update_tooltip(app: &mut App, hover: Option<Hit>) {
             text.push_str(&title);
         }
     }
-    let cell = app.layout.cells[d];
+    let cell = marker.unwrap_or(app.layout.cells[d]);
     let cx = app.pager_rect.left + ((cell.left + cell.right) / 2.0) as i32;
     let gap = (6.0 * app.layout.scale) as i32;
     let above = app.taskbar.map(|t| t.edge) != Some(taskbar::Edge::Top);
@@ -1532,7 +1569,14 @@ fn open_config() {
 
 #[cfg(test)]
 mod tests {
-    use super::wheel_target;
+    use super::{overflow_target, wheel_target};
+
+    #[test]
+    fn overflow_markers_target_nearest_hidden_desktop() {
+        assert_eq!(overflow_target(&(3..8), false), Some(2));
+        assert_eq!(overflow_target(&(3..8), true), Some(8));
+        assert_eq!(overflow_target(&(0..5), false), None);
+    }
 
     #[test]
     fn wheel_wraps_or_clamps() {
