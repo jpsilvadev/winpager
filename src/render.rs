@@ -587,7 +587,8 @@ fn draw_frame(
     }
     for (marker, dir) in [(layout.overflow_left, -1.0), (layout.overflow_right, 1.0)] {
         if let Some(m) = marker {
-            f.draw_overflow_marker(m, dir);
+            let hovered = matches!(f.view.hover, Some(Hit::Overflow { forward }) if forward == (dir > 0.0));
+            f.draw_overflow_marker(m, dir, hovered);
         }
     }
     if let Some(drag) = drag {
@@ -776,9 +777,15 @@ impl Frame<'_> {
 
     /// Overflow marker: a slim rounded plate with a chevron pointing towards the hidden
     /// desktops (`dir` = -1 for left, +1 for right).
-    fn draw_overflow_marker(&self, r: RectF, dir: f32) {
+    fn draw_overflow_marker(&self, r: RectF, dir: f32, hovered: bool) {
         let s = self.scale;
-        self.pen.fill(r, (4.0 * s).round().min(r.width() * 0.5), self.theme.cell_fill);
+        let radius = (4.0 * s).round().min(r.width() * 0.5);
+        self.pen.fill(r, radius, self.theme.cell_fill);
+        if hovered {
+            // Same treatment as a hovered cell.
+            self.pen.fill(r, radius, self.theme.cell_hover_fill);
+            self.pen.border(r, radius, 1.0, self.theme.cell_hover_border);
+        }
         let (cx, cy) = ((r.left + r.right) * 0.5, (r.top + r.bottom) * 0.5);
         // Half-height of the chevron and its depth, kept on the pixel grid + 0.5 for even
         // stroke weight.
