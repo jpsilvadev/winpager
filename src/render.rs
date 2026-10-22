@@ -706,6 +706,21 @@ impl Frame<'_> {
                 if layout.GetMetrics(&mut m).is_err() || m.width > max_w {
                     continue;
                 }
+                // Skip text that any window outline would cover (even partly): fragments
+                // of a label around a window read as noise.
+                let text_rect = RectF {
+                    left: inner.left + m.left - 1.0,
+                    top: inner.top + m.top - 1.0,
+                    right: inner.left + m.left + m.width + 1.0,
+                    bottom: inner.top + m.top + m.height + 1.0,
+                };
+                if self
+                    .snapshot
+                    .windows_on(d)
+                    .any(|w| intersect(self.window_rect(d, &w.rect), text_rect).is_some())
+                {
+                    continue;
+                }
                 self.pen.set(self.theme.label);
                 self.rt.DrawTextLayout(
                     D2D_POINT_2F { x: inner.left, y: inner.top },
@@ -721,8 +736,10 @@ impl Frame<'_> {
     /// Icon size in px for an outline of `ow` x `oh` px, or `None` when too small.
     fn icon_size(&self, ow: f32, oh: f32) -> Option<u32> {
         let s = self.scale;
-        let base = (cell_height(self.layout) * 0.42).round().clamp(8.0, 32.0 * s);
-        let avail = ow.min(oh) - 4.0 * s;
+        // ~16 px at a 38 px cell, but never below 10 px so 2-row cells still get icons.
+        let base = (cell_height(self.layout) * 0.42).round().clamp(10.0, 32.0 * s);
+        // 1 px margin on every side.
+        let avail = ow.min(oh) - 2.0;
         let size = base.min(avail).floor();
         (size >= 10.0).then_some(size as u32)
     }
