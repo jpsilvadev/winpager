@@ -447,7 +447,7 @@ struct TextContext<'a> {
 const MIN_LABEL_PX: f32 = 7.5;
 
 fn cell_height(layout: &Layout) -> f32 {
-    layout.cells.first().map_or(0.0, |c| c.height())
+    layout.cells.get(layout.visible.start).map_or(0.0, |c| c.height())
 }
 
 /// Desktop label font size in pixels for this layout (rounded to half pixels).
@@ -582,8 +582,13 @@ fn draw_frame(
     };
     let drag = f.view.drag;
 
-    for d in 0..layout.cells.len() {
+    for d in layout.visible.clone() {
         f.draw_cell(res, rt, d, hover_desktop == Some(d), drag);
+    }
+    for (marker, dir) in [(layout.overflow_left, -1.0), (layout.overflow_right, 1.0)] {
+        if let Some(m) = marker {
+            f.draw_overflow_marker(m, dir);
+        }
     }
     if let Some(drag) = drag {
         f.draw_ghost(res, rt, &drag);
@@ -769,9 +774,32 @@ impl Frame<'_> {
         }
     }
 
+    /// Overflow marker: a slim rounded plate with a chevron pointing towards the hidden
+    /// desktops (`dir` = -1 for left, +1 for right).
+    fn draw_overflow_marker(&self, r: RectF, dir: f32) {
+        let s = self.scale;
+        self.pen.fill(r, (4.0 * s).round().min(r.width() * 0.5), self.theme.cell_fill);
+        let (cx, cy) = ((r.left + r.right) * 0.5, (r.top + r.bottom) * 0.5);
+        // Half-height of the chevron and its depth, kept on the pixel grid + 0.5 for even
+        // stroke weight.
+        let half = (3.0 * s).round().max(2.0);
+        let depth = (half * 0.55).round().max(1.0) + 0.5;
+        let cx = cx.floor() + 0.5;
+        let cy = cy.floor() + 0.5;
+        let tip = D2D_POINT_2F { x: cx + dir * depth * 0.5, y: cy };
+        let a = D2D_POINT_2F { x: cx - dir * depth * 0.5, y: cy - half };
+        let b = D2D_POINT_2F { x: cx - dir * depth * 0.5, y: cy + half };
+        self.pen.set(self.theme.overflow_marker);
+        let width = (1.5 * s).max(1.25);
+        unsafe {
+            self.rt.DrawLine(a, tip, self.pen.brush, width, None);
+            self.rt.DrawLine(tip, b, self.pen.brush, width, None);
+        }
+    }
+
     fn draw_ghost(&self, res: &mut TargetResources, rt: &ID2D1RenderTarget, drag: &DragVisual) {
         let Some(w) = self.snapshot.windows.iter().find(|w| w.hwnd == drag.hwnd) else { return };
-        if drag.source_desktop >= self.layout.cells.len() {
+        if !self.layout.visible.contains(&drag.source_desktop) {
             return;
         }
         let src = self.window_rect(drag.source_desktop, &w.rect);
