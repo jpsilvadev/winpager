@@ -2,9 +2,11 @@
 
 use crate::model::{Hit, LayoutConfig, RectF, RectI, Snapshot};
 
-/// Smallest cell width as a fraction of the natural width before desktops start to be
-/// hidden behind a sliding window. Cells only ever get narrower, never shorter.
-const MIN_CELL_WIDTH_FRACTION: f32 = 0.6;
+/// Bounds for `LayoutConfig::min_cell_width` (the smallest cell width as a fraction of the
+/// natural width before desktops start to be
+/// hidden behind a sliding window). Cells only ever get narrower, never shorter.
+pub const MIN_CELL_WIDTH_RANGE: (f32, f32) = (0.3, 1.0);
+const DEFAULT_MIN_CELL_WIDTH: f32 = 0.8;
 /// Width of an overflow marker region in DIPs (the chevron drawn when desktops are hidden).
 const OVERFLOW_MARKER_DIP: f32 = 9.0;
 
@@ -38,7 +40,7 @@ impl Layout {
     /// 1. Natural size: cell height = `height_px` minus margins, cell width follows the
     ///    screen aspect ratio.
     /// 2. If all cells do not fit, narrow every cell (width only: the height and top stay)
-    ///    down to 60% of the natural width.
+    ///    down to `LayoutConfig::min_cell_width` of the natural width.
     /// 3. If they still do not fit, show a sliding window of `k` desktops at full height and
     ///    minimum width, containing `snapshot.current` (centered where possible, clamped to
     ///    the ends), with an overflow marker on each side that has hidden desktops.
@@ -90,7 +92,10 @@ impl Layout {
 
         let ch_nat = (height - 2 * margin).max(1);
         let cw_nat = cw_for(ch_nat);
-        let cw_min = (((cw_nat as f32) * MIN_CELL_WIDTH_FRACTION).round() as i32).clamp(1, cw_nat);
+        // Tolerate out-of-range or non-finite config values.
+        let frac = if cfg.min_cell_width.is_finite() { cfg.min_cell_width } else { DEFAULT_MIN_CELL_WIDTH }
+            .clamp(MIN_CELL_WIDTH_RANGE.0, MIN_CELL_WIDTH_RANGE.1);
+        let cw_min = (((cw_nat as f32) * frac).round() as i32).clamp(1, cw_nat);
         let p = Placement { gap, marker_w };
 
         // (1) natural size, (2) width-only shrink: the widest cell in [cw_min, cw_nat]
@@ -266,7 +271,7 @@ mod tests {
         let m = cfg().vertical_margin.round();
         let ch = 48.0 - 2.0 * m;
         let cw = (ch * 3440.0 / 1392.0).round();
-        (ch, m, cw, (cw * 0.6).round())
+        (ch, m, cw, (cw * cfg().min_cell_width).round())
     }
 
     #[test]
@@ -327,7 +332,7 @@ mod tests {
         assert_eq!(l.visible, 0..11);
         assert!(l.overflow_left.is_none() && l.overflow_right.is_none());
         assert!(l.width <= 680);
-        // Height and top are the natural ones; only the width shrank, and not below 60%.
+        // Height and top are the natural ones; only the width shrank, and not below the configured floor.
         let w = l.cells[0].width();
         assert!((cw_min..cw_nat).contains(&w), "width {w}");
         for c in &l.cells {
@@ -343,8 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn shrink_floor_is_sixty_percent() {
-        // Exactly enough room for 16 cells at the 60% floor: shrink, no sliding.
+    fn shrink_floor_follows_config() {
+        // Exactly enough room for 16 cells at the configured floor: shrink, no sliding.
         let (ch, _, _, cw_min) = nat();
         let cwm = cw_min as i32;
         let s = wa(16, 3);
@@ -360,6 +365,52 @@ mod tests {
     }
 
     #[test]
+    fn default_floor_slides_eleven_desktops_in_634px() {
+        // Default floor 0.8: the real-taskbar span of 634 px fits only 10 shrunken cells.
+        let (ch, _, _, cw_min) = nat();
+        let s = wa(11, 5);
+        let l = Layout::compute(&s, &cfg(), 48, 96, 634);
+        assert!(l.visible.len() < 11, "visible {:?}", l.visible);
+        assert!(l.visible.contains(&5));
+        assert!(l.overflow_left.is_some() || l.overflow_right.is_some());
+        assert!(l.width <= 634);
+        let c = l.cells[5];
+        assert_eq!((c.width(), c.height()), (cw_min, ch));
+        // 10 desktops still fit by shrinking only.
+        let l = Layout::compute(&wa(10, 5), &cfg(), 48, 96, 634);
+        assert_eq!(l.visible, 0..10);
+    }
+
+    #[test]
+    fn floor_of_one_never_shrinks() {
+        let cfg = LayoutConfig { min_cell_width: 1.0, ..LayoutConfig::default() };
+        let (_, _, cw_nat, _) = nat();
+        let s = wa(11, 5);
+        // 11 natural cells need 11*cw + 40 px; one pixel less and it slides immediately.
+        let need = 11 * cw_nat as i32 + 10 * 4;
+        let l = Layout::compute(&s, &cfg, 48, 96, need);
+        assert_eq!(l.visible, 0..11);
+        let l = Layout::compute(&s, &cfg, 48, 96, need - 1);
+        assert!(l.visible.len() < 11 && l.visible.contains(&5));
+        assert_eq!(l.cells[5].width(), cw_nat);
+    }
+
+    #[test]
+    fn out_of_range_floor_is_tolerated() {
+        let s = wa(11, 5);
+        for v in [-1.0f32, 0.0, 0.1, 5.0, f32::NAN, f32::INFINITY] {
+            let cfg = LayoutConfig { min_cell_width: v, ..LayoutConfig::default() };
+            let l = Layout::compute(&s, &cfg, 48, 96, 634);
+            assert!(l.width <= 634, "floor {v}");
+            assert!(l.visible.contains(&5), "floor {v}");
+        }
+        // Below the range behaves like 0.3, above like 1.0.
+        let at = |v| Layout::compute(&s, &LayoutConfig { min_cell_width: v, ..LayoutConfig::default() }, 48, 96, 634);
+        assert_eq!(at(0.0).cells, at(0.3).cells);
+        assert_eq!(at(5.0).cells, at(1.0).cells);
+    }
+
+    #[test]
     fn sliding_window_current_at_start() {
         let (ch, _, _, cw_min) = nat();
         let s = wa(20, 0);
@@ -370,7 +421,7 @@ mod tests {
         let r = l.overflow_right.expect("right marker");
         assert!(l.width <= 680);
         assert_eq!(l.width as f32, r.right);
-        // Full height, minimum (60%) width.
+        // Full height, minimum width (from the config).
         assert_eq!(l.cells[0].height(), ch);
         assert_eq!(l.cells[0].width(), cw_min);
         // Hidden desktops are empty and never hit.

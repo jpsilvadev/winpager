@@ -33,7 +33,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
-use crate::config::{Anchor, Config, Placement};
+use crate::config::{Anchor, ChevronMode, Config, Placement};
 use crate::icons::IconCache;
 use crate::layout::Layout;
 use crate::menu::{self, Cmd, MenuState};
@@ -1311,9 +1311,15 @@ fn on_button_up(app: &mut App, x: i32, y: i32, press: Option<Press>, drag: Optio
     // Click on an overflow marker: switch to the nearest hidden desktop on that side.
     if let Hit::Overflow { forward } = press.hit {
         if app.layout.hit_test(&app.snapshot, fx, fy) == press.hit
-            && let Some(target) = overflow_target(&app.layout.visible, forward)
+            && let Some(target) = chevron_target(app, forward)
         {
             switch_to(app, target);
+            // The next target changed (Step mode) and the marker may have moved: refresh the tooltip.
+            app.tooltip_key = None;
+            let hover = app.layout.hit_test(&app.snapshot, fx, fy);
+            update_tooltip(app, Some(hover));
+            app.view.hover = Some(hover);
+            present(app);
         }
         return;
     }
@@ -1324,9 +1330,32 @@ fn on_button_up(app: &mut App, x: i32, y: i32, press: Option<Press>, drag: Optio
     }
 }
 
-/// Nearest hidden desktop on the given side of the visible range.
-fn overflow_target(visible: &std::ops::Range<usize>, forward: bool) -> Option<usize> {
-    if forward { Some(visible.end) } else { visible.start.checked_sub(1) }
+/// Desktop a click on an overflow chevron switches to (`None` = nothing to do).
+/// `Step`: one desktop towards the clicked side (no wrap). `Jump`: the nearest hidden desktop.
+fn overflow_target(
+    mode: ChevronMode,
+    visible: &std::ops::Range<usize>,
+    current: usize,
+    count: usize,
+    forward: bool,
+) -> Option<usize> {
+    let t = match (mode, forward) {
+        (ChevronMode::Step, true) => current.checked_add(1),
+        (ChevronMode::Step, false) => current.checked_sub(1),
+        (ChevronMode::Jump, true) => Some(visible.end),
+        (ChevronMode::Jump, false) => visible.start.checked_sub(1),
+    };
+    t.filter(|&t| t < count)
+}
+
+fn chevron_target(app: &App, forward: bool) -> Option<usize> {
+    overflow_target(
+        app.cfg.chevron,
+        &app.layout.visible,
+        app.snapshot.current,
+        app.snapshot.desktops.len(),
+        forward,
+    )
 }
 
 fn switch_to(app: &mut App, index: usize) {
@@ -1390,7 +1419,7 @@ fn update_tooltip(app: &mut App, hover: Option<Hit>) {
         Hit::Window { desktop, hwnd } => (desktop, Some(hwnd), None),
         Hit::Overflow { forward } => {
             // Names the desktop a click would switch to.
-            match overflow_target(&app.layout.visible, forward) {
+            match chevron_target(app, forward) {
                 Some(t) if t < app.snapshot.desktops.len() => {
                     let m = if forward { app.layout.overflow_right } else { app.layout.overflow_left };
                     (t, None, m)
@@ -1452,6 +1481,7 @@ fn show_context_menu(pager: HWND, x: i32, y: i32) {
             show_icons: app.cfg.layout.show_icons,
             show_names: app.cfg.layout.show_names,
             placement: app.cfg.placement,
+            chevron: app.cfg.chevron,
             autostart: menu::autostart_enabled(),
         };
         Some((app.control, st))
@@ -1522,6 +1552,13 @@ fn handle_command(owner: HWND, cmd: Cmd, target: Option<usize>) {
                 present(app);
             });
         }
+        Cmd::Chevron(m) => {
+            with_app(|app| {
+                app.cfg.chevron = m;
+                save_config(app);
+                app.tooltip_key = None;
+            });
+        }
         Cmd::Place(p) => {
             with_app(|app| {
                 if app.cfg.placement != p || app.effective != p {
@@ -1573,9 +1610,18 @@ mod tests {
 
     #[test]
     fn overflow_markers_target_nearest_hidden_desktop() {
-        assert_eq!(overflow_target(&(3..8), false), Some(2));
-        assert_eq!(overflow_target(&(3..8), true), Some(8));
-        assert_eq!(overflow_target(&(0..5), false), None);
+        use crate::config::ChevronMode::{Jump, Step};
+        // Jump: nearest hidden desktop, regardless of the current one.
+        assert_eq!(overflow_target(Jump, &(3..8), 5, 12, false), Some(2));
+        assert_eq!(overflow_target(Jump, &(3..8), 5, 12, true), Some(8));
+        assert_eq!(overflow_target(Jump, &(0..5), 2, 12, false), None);
+        assert_eq!(overflow_target(Jump, &(7..12), 9, 12, true), None);
+        // Step: one desktop towards the clicked side, no wrap.
+        assert_eq!(overflow_target(Step, &(3..8), 5, 12, false), Some(4));
+        assert_eq!(overflow_target(Step, &(3..8), 5, 12, true), Some(6));
+        assert_eq!(overflow_target(Step, &(3..8), 0, 12, false), None);
+        assert_eq!(overflow_target(Step, &(3..8), 11, 12, true), None);
+        assert_eq!(overflow_target(Step, &(0..5), 3, 12, true), Some(4));
     }
 
     #[test]
