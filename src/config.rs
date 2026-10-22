@@ -98,7 +98,7 @@ impl Config {
         } else {
             LayoutConfig::default().min_cell_width
         };
-        self.layout.spacing =self.layout.spacing.clamp(0.0, 64.0);
+        self.layout.spacing = self.layout.spacing.clamp(0.0, 64.0);
         self.layout.vertical_margin = self.layout.vertical_margin.clamp(0.0, 64.0);
         self.offset = self.offset.clamp(-4000, 4000);
         self
