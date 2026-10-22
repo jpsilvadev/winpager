@@ -69,6 +69,9 @@ pub struct Theme {
     pub ghost_border: Rgba,
     pub drop_fill: Rgba,
     pub drop_border: Rgba,
+    /// Backplate of the floating widget (a Fluent-like surface) and its 1 px border.
+    pub plate_fill: Rgba,
+    pub plate_border: Rgba,
 }
 
 impl Theme {
@@ -113,6 +116,8 @@ impl Theme {
                 ghost_border: acc.mix(fg, 0.35).with_alpha(1.0),
                 drop_fill: acc.with_alpha(0.38),
                 drop_border: acc.mix(fg, 0.25).with_alpha(1.0),
+                plate_fill: Rgba::from_rgb8(0x2c, 0x2c, 0x2c).with_alpha(0.95),
+                plate_border: fg.with_alpha(0.16),
             }
         } else {
             Theme {
@@ -136,6 +141,8 @@ impl Theme {
                 ghost_border: acc.with_alpha(1.0),
                 drop_fill: acc.with_alpha(0.32),
                 drop_border: acc.with_alpha(1.0),
+                plate_fill: Rgba::from_rgb8(0xf3, 0xf3, 0xf3).with_alpha(0.95),
+                plate_border: fg.with_alpha(0.14),
             }
         }
     }

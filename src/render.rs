@@ -576,6 +576,13 @@ fn draw_frame(
         theme.background,
     );
 
+    if view.backplate {
+        let full = RectF { left: 0.0, top: 0.0, right: layout.width.max(1) as f32, bottom: layout.height.max(1) as f32 };
+        let radius = (8.0 * f.scale).round();
+        f.pen.fill(full, radius, theme.plate_fill);
+        f.pen.border(full, radius, 1.0, theme.plate_border);
+    }
+
     let hover_desktop = match f.view.hover {
         Some(Hit::Desktop(d)) | Some(Hit::Window { desktop: d, .. }) => Some(d),
         _ => None,

@@ -7,6 +7,9 @@ use crate::model::{Hit, LayoutConfig, RectF, RectI, Snapshot};
 /// hidden behind a sliding window). Cells only ever get narrower, never shorter.
 pub const MIN_CELL_WIDTH_RANGE: (f32, f32) = (0.3, 1.0);
 const DEFAULT_MIN_CELL_WIDTH: f32 = 0.8;
+/// Horizontal padding between the floating widget's backplate edge and the cells, in DIPs
+/// (apply with `Layout::pad_x`).
+pub const PLATE_PAD_DIP: f32 = 8.0;
 /// Width of an overflow marker region in DIPs (the chevron drawn when desktops are hidden).
 const OVERFLOW_MARKER_DIP: f32 = 9.0;
 
@@ -166,6 +169,29 @@ impl Layout {
         }
         self.width = x;
         self.visible = shown;
+    }
+
+    /// Add `pad` pixels of empty space left and right of the content (cells and markers are
+    /// shifted, `width` grows by `2 * pad`). Used for the floating widget's backplate; the
+    /// caller subtracts `2 * pad` from the `max_width_px` it passes to `compute`.
+    pub fn pad_x(&mut self, pad: i32) {
+        let pad = pad.max(0);
+        if pad == 0 || self.cells.is_empty() {
+            return;
+        }
+        let dx = pad as f32;
+        let shift = |r: &mut RectF| {
+            r.left += dx;
+            r.right += dx;
+        };
+        for i in self.visible.clone() {
+            if let Some(c) = self.cells.get_mut(i) {
+                shift(c);
+            }
+        }
+        self.overflow_left.iter_mut().for_each(shift);
+        self.overflow_right.iter_mut().for_each(shift);
+        self.width += 2 * pad;
     }
 
     /// Map a window's screen rect into the cell of desktop `desktop` (not clipped).
@@ -362,6 +388,29 @@ mod tests {
         assert!(l.visible.len() < 16);
         let c = l.cells[l.visible.start];
         assert_eq!((c.width(), c.height()), (cw_min, ch));
+    }
+
+    #[test]
+    fn pad_x_shifts_content_and_hit_tests_follow() {
+        let s = wa(12, 6);
+        let mut l = Layout::compute(&s, &cfg(), 48, 96, 400);
+        let (w0, cells0) = (l.width, l.cells.clone());
+        let (a, b) = (l.overflow_left.unwrap(), l.overflow_right.unwrap());
+        l.pad_x(8);
+        assert_eq!(l.width, w0 + 16);
+        for i in l.visible.clone() {
+            assert_eq!(l.cells[i].left, cells0[i].left + 8.0);
+            assert_eq!(l.cells[i].width(), cells0[i].width());
+        }
+        for i in (0..12).filter(|i| !l.visible.contains(i)) {
+            assert_eq!(l.cells[i], RectF::default());
+        }
+        assert_eq!(l.overflow_left.unwrap().left, a.left + 8.0);
+        assert_eq!(l.overflow_right.unwrap().right, b.right + 8.0);
+        // The padding itself is empty; shifted content is hit.
+        assert_eq!(l.hit_test(&s, 2.0, 24.0), Hit::None);
+        assert_eq!(l.hit_test(&s, l.overflow_left.unwrap().left + 1.0, 24.0), Hit::Overflow { forward: false });
+        assert_eq!(l.hit_test(&s, l.width as f32 - 2.0, 24.0), Hit::None);
     }
 
     #[test]

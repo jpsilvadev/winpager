@@ -196,28 +196,33 @@ fn no_view(_: &Layout, _: &Snapshot) -> ViewState {
 }
 
 fn hover_cell(_: &Layout, _: &Snapshot) -> ViewState {
-    ViewState { hover: Some(Hit::Desktop(1)), drag: None }
+    ViewState { hover: Some(Hit::Desktop(1)), drag: None, backplate: false }
 }
 
 fn hover_window(l: &Layout, s: &Snapshot) -> ViewState {
     // Hover the left tile on desktop 0.
     let c = l.cells[0];
     let hit = l.hit_test(s, c.left + c.width() * 0.2, c.top + c.height() * 0.5);
-    ViewState { hover: Some(hit), drag: None }
+    ViewState { hover: Some(hit), drag: None, backplate: false }
 }
 
 fn hover_marker_left(l: &Layout, s: &Snapshot) -> ViewState {
     let m = l.overflow_left.expect("left marker");
     let hit = l.hit_test(s, m.left + m.width() * 0.5, m.top + m.height() * 0.5);
     assert_eq!(hit, Hit::Overflow { forward: false });
-    ViewState { hover: Some(hit), drag: None }
+    ViewState { hover: Some(hit), drag: None, backplate: false }
 }
 
 fn hover_marker_right(l: &Layout, s: &Snapshot) -> ViewState {
     let m = l.overflow_right.expect("right marker");
     let hit = l.hit_test(s, m.left + m.width() * 0.5, m.top + m.height() * 0.5);
     assert_eq!(hit, Hit::Overflow { forward: true });
-    ViewState { hover: Some(hit), drag: None }
+    ViewState { hover: Some(hit), drag: None, backplate: false }
+}
+
+/// Floating widget: rounded backplate plus horizontal padding.
+fn plate_view(_: &Layout, _: &Snapshot) -> ViewState {
+    ViewState { backplate: true, ..Default::default() }
 }
 
 fn drag_view(l: &Layout, s: &Snapshot) -> ViewState {
@@ -237,6 +242,7 @@ fn drag_view(l: &Layout, s: &Snapshot) -> ViewState {
             grab_offset: ((src.left + 4.0 - r.left).round(), (src.top + 4.0 - r.top).round() + 1.0),
             target_desktop: Some(6),
         }),
+        ..Default::default()
     }
 }
 
@@ -247,9 +253,12 @@ fn write_case(
     cfg: &LayoutConfig,
     c: &Case,
 ) -> Result<()> {
-    let layout = Layout::compute(snap, cfg, c.height, c.dpi, c.max_w);
+    let mut layout = Layout::compute(snap, cfg, c.height, c.dpi, c.max_w);
     let theme = Theme::from_parts(c.dark, Rgba::from_rgb8(0x00, 0x78, 0xD4));
     let view = (c.view)(&layout, snap);
+    if view.backplate {
+        layout.pad_x((winpager::layout::PLATE_PAD_DIP * layout.scale).round() as i32);
+    }
     let (w, h, px) = r.render_to_bgra(snap, &layout, &view, &theme, cfg)?;
     let min_alpha = px.chunks(4).map(|p| p[3]).min().unwrap_or(0);
     anyhow::ensure!(min_alpha >= 1, "{}: found a fully transparent pixel", c.name);
@@ -321,6 +330,16 @@ fn main() -> Result<()> {
     let cfg = LayoutConfig { show_names: true, ..Default::default() };
     let c = Case { name: "dark_names", height: 48, dpi: 96, dark: true, max_w: i32::MAX, view: no_view };
     write_case(&mut r, &out, &snap, &cfg, &c)?;
+    // Floating widget backplate (7 desktops, and a sliding 12-desktop strip at 150% DPI).
+    for dark in [true, false] {
+        let t = if dark { "dark" } else { "light" };
+        let name: &'static str = Box::leak(format!("{t}_plate").into_boxed_str());
+        let c = Case { name, height: 48, dpi: 96, dark, max_w: i32::MAX, view: plate_view };
+        write_case(&mut r, &out, &snap, &LayoutConfig::default(), &c)?;
+        let name: &'static str = Box::leak(format!("{t}_plate_overflow12_150").into_boxed_str());
+        let c = Case { name, height: 72, dpi: 144, dark, max_w: 900, view: plate_view };
+        write_case(&mut r, &out, &fake_snapshot_n(12, 6), &LayoutConfig::default(), &c)?;
+    }
     // Overflow: a 680 px budget (the free gap on the dev machine) with more desktops.
     let cfg = LayoutConfig::default();
     for dark in [true, false] {

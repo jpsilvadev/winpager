@@ -16,6 +16,8 @@ pub enum Cmd {
     ShowNames,
     Place(Placement),
     Chevron(ChevronMode),
+    Topmost,
+    ResetFloatingPos,
     Autostart,
     OpenConfig,
     Exit,
@@ -29,6 +31,8 @@ const ID_PLACE_TASKBAR: usize = 30;
 const ID_PLACE_FLOATING: usize = 31;
 const ID_CHEVRON_STEP: usize = 32;
 const ID_CHEVRON_JUMP: usize = 33;
+const ID_TOPMOST: usize = 34;
+const ID_RESET_POS: usize = 35;
 const ID_AUTOSTART: usize = 40;
 const ID_CONFIG: usize = 41;
 const ID_EXIT: usize = 99;
@@ -41,6 +45,9 @@ pub struct MenuState {
     pub show_names: bool,
     pub placement: Placement,
     pub chevron: ChevronMode,
+    /// Placement is Floating (enables the floating-only items).
+    pub floating: bool,
+    pub floating_topmost: bool,
     pub autostart: bool,
 }
 
@@ -93,6 +100,9 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
             );
             add(menu, MF_STRING | MF_POPUP, pm.0 as usize, w!("Placement"));
         }
+        let float_fl = if st.floating { MF_STRING } else { MF_STRING | MF_GRAYED };
+        add(menu, float_fl | flag(st.floating_topmost), ID_TOPMOST, w!("Always on top"));
+        add(menu, float_fl, ID_RESET_POS, w!("Reset floating position"));
         if let Some(cm) = chevron_menu {
             add(cm, MF_STRING, ID_CHEVRON_STEP, w!("Step (one desktop)"));
             add(cm, MF_STRING, ID_CHEVRON_JUMP, w!("Jump (nearest hidden)"));
@@ -137,6 +147,8 @@ pub fn show(owner: HWND, pt: (i32, i32), st: &MenuState) -> Option<Cmd> {
             ID_NAMES => Some(Cmd::ShowNames),
             ID_PLACE_TASKBAR => Some(Cmd::Place(Placement::Taskbar)),
             ID_PLACE_FLOATING => Some(Cmd::Place(Placement::Floating)),
+            ID_TOPMOST => Some(Cmd::Topmost),
+            ID_RESET_POS => Some(Cmd::ResetFloatingPos),
             ID_CHEVRON_STEP => Some(Cmd::Chevron(ChevronMode::Step)),
             ID_CHEVRON_JUMP => Some(Cmd::Chevron(ChevronMode::Jump)),
             ID_AUTOSTART => Some(Cmd::Autostart),
