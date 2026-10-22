@@ -742,8 +742,8 @@ impl Frame<'_> {
     /// Icon size in px for an outline of `ow` x `oh` px, or `None` when too small.
     fn icon_size(&self, ow: f32, oh: f32) -> Option<u32> {
         let s = self.scale;
-        // ~16 px at a 38 px cell, but never below 10 px so 2-row cells still get icons.
-        let base = (cell_height(self.layout) * 0.42).round().clamp(10.0, 32.0 * s);
+        // ~15 px in a 28 px cell, capped at 16 DIP; never below 10 px.
+        let base = (cell_height(self.layout) * 0.55).round().clamp(10.0, (16.0 * s).round());
         // 1 px margin on every side.
         let avail = ow.min(oh) - 2.0;
         let size = base.min(avail).floor();

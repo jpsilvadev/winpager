@@ -326,24 +326,29 @@ fn main() -> Result<()> {
     for dark in [true, false] {
         let t = if dark { "dark" } else { "light" };
         let case = |name: &'static str, h, dpi, max_w| Case { name, height: h, dpi, dark, max_w, view: no_view };
-        let n12 = [0usize, 6, 11];
-        for cur in n12 {
+        // 12 desktops: too wide at the natural size, so cells only get narrower.
+        for cur in [0usize, 6, 11] {
             let name: &'static str = Box::leak(format!("{t}_overflow12_cur{cur}").into_boxed_str());
             write_case(&mut r, &out, &fake_snapshot_n(12, cur), &cfg, &case(name, 48, 96, 680))?;
         }
+        // 20 desktops: even the narrowest cells do not fit, so a sliding window + markers.
+        for cur in [0usize, 10, 19] {
+            let name: &'static str = Box::leak(format!("{t}_overflow20_cur{cur}").into_boxed_str());
+            write_case(&mut r, &out, &fake_snapshot_n(20, cur), &cfg, &case(name, 48, 96, 680))?;
+        }
         // Hovered overflow markers (current in the middle: both markers exist).
         for (suffix, view) in [("left", hover_marker_left as fn(&Layout, &Snapshot) -> ViewState), ("right", hover_marker_right)] {
-            let name: &'static str = Box::leak(format!("{t}_overflow12_hover_{suffix}").into_boxed_str());
+            let name: &'static str = Box::leak(format!("{t}_overflow20_hover_{suffix}").into_boxed_str());
             let c = Case { name, height: 48, dpi: 96, dark, max_w: 680, view };
-            write_case(&mut r, &out, &fake_snapshot_n(12, 6), &cfg, &c)?;
+            write_case(&mut r, &out, &fake_snapshot_n(20, 10), &cfg, &c)?;
         }
         let name: &'static str = Box::leak(format!("{t}_overflow9_shrink").into_boxed_str());
-        write_case(&mut r, &out, &fake_snapshot_n(9, 4), &cfg, &case(name, 48, 96, 680))?;
+        write_case(&mut r, &out, &fake_snapshot_n(9, 4), &cfg, &case(name, 48, 96, 520))?;
         let name: &'static str = Box::leak(format!("{t}_overflow12_unlimited").into_boxed_str());
         write_case(&mut r, &out, &fake_snapshot_n(12, 6), &cfg, &case(name, 48, 96, i32::MAX))?;
         // 150% DPI: the gap scales too (1020 px).
-        let name: &'static str = Box::leak(format!("{t}_overflow12_cur6_150").into_boxed_str());
-        write_case(&mut r, &out, &fake_snapshot_n(12, 6), &cfg, &case(name, 72, 144, 1020))?;
+        let name: &'static str = Box::leak(format!("{t}_overflow20_cur10_150").into_boxed_str());
+        write_case(&mut r, &out, &fake_snapshot_n(20, 10), &cfg, &case(name, 72, 144, 1020))?;
     }
     // Option variants: no icons / no names.
     let cfg = LayoutConfig { show_icons: false, show_names: false, ..Default::default() };
