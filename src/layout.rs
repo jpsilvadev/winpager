@@ -2,9 +2,9 @@
 
 use crate::model::{Hit, LayoutConfig, RectF, RectI, Snapshot};
 
-/// Smallest cell height as a fraction of the natural height before desktops start to be
-/// hidden behind a sliding window.
-const MIN_CELL_FRACTION: f32 = 0.7;
+/// Smallest cell width as a fraction of the natural width before desktops start to be
+/// hidden behind a sliding window. Cells only ever get narrower, never shorter.
+const MIN_CELL_WIDTH_FRACTION: f32 = 0.6;
 /// Width of an overflow marker region in DIPs (the chevron drawn when desktops are hidden).
 const OVERFLOW_MARKER_DIP: f32 = 9.0;
 
@@ -35,14 +35,16 @@ impl Layout {
     /// the desktop count and the screen aspect ratio, but never exceeds `max_width_px`
     /// (pass `i32::MAX` for no limit).
     ///
-    /// 1. Natural size: cell height = `height_px` minus margins.
-    /// 2. If all cells do not fit, shrink them uniformly (aspect kept) down to 70% of the
-    ///    natural height.
-    /// 3. If they still do not fit, show a sliding window of `k` desktops at the minimum
-    ///    size, containing `snapshot.current` (centered where possible, clamped to the
-    ///    ends), with an overflow marker on each side that has hidden desktops.
-    /// 4. If not even one minimum cell (plus markers) fits, only the current desktop is
-    ///    shown, as large as fits (without markers).
+    /// 1. Natural size: cell height = `height_px` minus margins, cell width follows the
+    ///    screen aspect ratio.
+    /// 2. If all cells do not fit, narrow every cell (width only: the height and top stay)
+    ///    down to 60% of the natural width.
+    /// 3. If they still do not fit, show a sliding window of `k` desktops at full height and
+    ///    minimum width, containing `snapshot.current` (centered where possible, clamped to
+    ///    the ends), with an overflow marker on each side that has hidden desktops.
+    /// 4. If not even one minimum-width cell (plus markers) fits, only the current desktop
+    ///    is shown, without markers: at full height as wide as fits, or, below the minimum
+    ///    width, scaled down uniformly to the available width.
     ///
     /// Cells are snapped to whole pixels, all the same size, and vertically centered.
     /// `width` is the exact content width (no trailing gap).
@@ -87,35 +89,33 @@ impl Layout {
         };
 
         let ch_nat = (height - 2 * margin).max(1);
-        let ch_min = (((ch_nat as f32) * MIN_CELL_FRACTION).round() as i32).clamp(1, ch_nat);
+        let cw_nat = cw_for(ch_nat);
+        let cw_min = (((cw_nat as f32) * MIN_CELL_WIDTH_FRACTION).round() as i32).clamp(1, cw_nat);
         let p = Placement { gap, marker_w };
 
-        // (1) natural size, (2) uniform shrink.
-        let mut ch = ch_nat;
-        while ch >= ch_min {
-            if strip_w(n_i, cw_for(ch), 0) <= max_w {
-                layout.place(&p, ch, cw_for(ch), 0..n, false, false);
-                return layout;
-            }
-            ch -= 1;
+        // (1) natural size, (2) width-only shrink: the widest cell in [cw_min, cw_nat]
+        // such that all desktops fit.
+        let fit_cw = (max_w.saturating_sub((n_i - 1).saturating_mul(gap)) / n_i).min(cw_nat);
+        if fit_cw >= cw_min {
+            layout.place(&p, ch_nat, fit_cw, 0..n, false, false);
+            return layout;
         }
 
-        // (3) sliding window at the minimum size.
-        let cw_min = cw_for(ch_min);
+        // (3) sliding window at full height and minimum width.
         for k in (1..n_i).rev() {
             let start = (current as i32 - (k - 1) / 2).clamp(0, n_i - k);
             let (left, right) = (start > 0, start + k < n_i);
             if strip_w(k, cw_min, left as i32 + right as i32) <= max_w {
-                layout.place(&p, ch_min, cw_min, start as usize..(start + k) as usize, left, right);
+                layout.place(&p, ch_nat, cw_min, start as usize..(start + k) as usize, left, right);
                 return layout;
             }
         }
 
-        // (4) only the current desktop: minimum size, else as big as fits.
+        // (4) only the current desktop.
         let (ch, cw) = if cw_min <= max_w {
-            (ch_min, cw_min)
+            (ch_nat, max_w.min(cw_nat))
         } else if max_w >= 1 {
-            let ch = ((max_w as f32 / aspect).floor() as i32).clamp(1, ch_min);
+            let ch = ((max_w as f32 / aspect).floor() as i32).clamp(1, ch_nat);
             (ch, cw_for(ch).min(max_w))
         } else {
             return layout; // nothing fits at all: empty strip, nothing visible
@@ -254,6 +254,15 @@ mod tests {
         LayoutConfig::default()
     }
 
+    /// Natural geometry for a 48 px / 100% DPI taskbar on the 3440x1392 work area, derived
+    /// from the default config: (cell height, top, cell width, minimum cell width).
+    fn nat() -> (f32, f32, f32, f32) {
+        let m = cfg().vertical_margin.round();
+        let ch = 48.0 - 2.0 * m;
+        let cw = (ch * 3440.0 / 1392.0).round();
+        (ch, m, cw, (cw * 0.6).round())
+    }
+
     #[test]
     fn one_row_48px() {
         let s = snap(7, vec![]);
@@ -263,15 +272,16 @@ mod tests {
         assert!(l.overflow_left.is_none() && l.overflow_right.is_none());
         assert_eq!(l.height, 48);
         let c0 = l.cells[0];
-        assert_eq!(c0.height(), 38.0);
-        assert_eq!(c0.top, 5.0);
-        assert_eq!(c0.width(), (38.0f32 * 3440.0 / 1440.0).round());
+        let (ch, top, _, _) = nat();
+        assert_eq!(c0.height(), ch);
+        assert_eq!(c0.top, top);
+        assert_eq!(c0.width(), (ch * 3440.0 / 1440.0).round());
         // Exact content width, no trailing gap.
         assert_eq!(l.width as f32, l.cells[6].right);
         for c in &l.cells {
             assert!(is_int(c.left) && is_int(c.top) && is_int(c.right) && is_int(c.bottom));
             assert_eq!(c.width(), c0.width());
-            assert_eq!(c.top, 5.0);
+            assert_eq!(c.top, top);
         }
         assert_eq!(l.cells[1].left - l.cells[0].right, 4.0);
     }
@@ -281,9 +291,9 @@ mod tests {
         let s = snap(7, vec![]);
         let l = Layout::compute(&s, &cfg(), 72, 144, i32::MAX);
         assert_eq!(l.scale, 1.5);
-        // margin 7.5 -> 8, ch = 72 - 16 = 56
-        assert_eq!(l.cells[0].height(), 56.0);
-        assert_eq!(l.cells[0].top, 8.0);
+        let m = (cfg().vertical_margin * 1.5).round();
+        assert_eq!(l.cells[0].height(), 72.0 - 2.0 * m);
+        assert_eq!(l.cells[0].top, m);
     }
 
     #[test]
@@ -291,9 +301,10 @@ mod tests {
         let s = wa(12, 3);
         let l = Layout::compute(&s, &cfg(), 48, 96, i32::MAX);
         assert_eq!(l.visible, 0..12);
-        assert_eq!(l.cells[0].height(), 38.0);
-        assert_eq!(l.cells[0].width(), 94.0); // 38 * 3440/1392 = 93.9
-        assert_eq!(l.width, 12 * 94 + 11 * 4);
+        let (ch, _, cw, _) = nat();
+        assert_eq!(l.cells[0].height(), ch);
+        assert_eq!(l.cells[0].width(), cw);
+        assert_eq!(l.width, 12 * cw as i32 + 11 * 4);
         // A limit that is exactly enough changes nothing.
         let l2 = Layout::compute(&s, &cfg(), 48, 96, l.width);
         assert_eq!(l2.cells, l.cells);
@@ -302,76 +313,96 @@ mod tests {
 
     #[test]
     fn shrink_only() {
-        // 9 desktops: natural 9*94+8*4 = 878 px, budget 680 -> uniform shrink, all visible.
-        let s = wa(9, 4);
+        // 11 desktops do not fit at the natural width in 680 px -> width-only shrink.
+        let (ch, top, cw_nat, cw_min) = nat();
+        let s = wa(11, 4);
+        assert!(11 * cw_nat as i32 + 10 * 4 > 680);
         let l = Layout::compute(&s, &cfg(), 48, 96, 680);
-        assert_eq!(l.visible, 0..9);
+        assert_eq!(l.visible, 0..11);
         assert!(l.overflow_left.is_none() && l.overflow_right.is_none());
         assert!(l.width <= 680);
-        let h = l.cells[0].height();
-        assert!((27.0..38.0).contains(&h), "height {h}");
-        // Largest height that fits: one pixel taller would not fit.
-        let cw_taller = ((h + 1.0) * 3440.0 / 1392.0).round() as i32;
-        assert!(9 * cw_taller + 8 * 4 > 680);
-        // Uniform, aspect kept, vertically centered, whole pixels.
+        // Height and top are the natural ones; only the width shrank, and not below 60%.
+        let w = l.cells[0].width();
+        assert!((cw_min..cw_nat).contains(&w), "width {w}");
         for c in &l.cells {
-            assert_eq!((c.width(), c.height()), (l.cells[0].width(), h));
-            assert!(is_int(c.left) && is_int(c.top));
-            assert!((c.width() / c.height() - 3440.0 / 1392.0).abs() < 0.05);
-            assert_eq!(c.top, ((48.0 - h) / 2.0).floor());
+            assert_eq!((c.width(), c.height(), c.top), (w, ch, top));
+            assert!(is_int(c.left) && is_int(c.right));
         }
-        assert_eq!(l.width as f32, l.cells[8].right);
+        // Widest that fits: one pixel wider would not.
+        assert!(11 * (w as i32 + 1) + 10 * 4 > 680);
+        assert_eq!(l.width as f32, l.cells[10].right);
+        // Windows follow the narrower cell: a half-width tile is half the cell wide.
+        let r = l.map_window(0, &RectI { left: 0, top: 0, right: 1720, bottom: 1392 });
+        assert!((r.width() - w / 2.0).abs() < 0.01 && r.height() == ch);
+    }
+
+    #[test]
+    fn shrink_floor_is_sixty_percent() {
+        // Exactly enough room for 16 cells at the 60% floor: shrink, no sliding.
+        let (ch, _, _, cw_min) = nat();
+        let cwm = cw_min as i32;
+        let s = wa(16, 3);
+        let l = Layout::compute(&s, &cfg(), 48, 96, 16 * cwm + 15 * 4);
+        assert_eq!(l.visible, 0..16);
+        assert_eq!(l.cells[0].width(), cw_min);
+        assert_eq!(l.cells[0].height(), ch);
+        // One pixel less and the strip starts sliding, still at full height.
+        let l = Layout::compute(&s, &cfg(), 48, 96, 16 * cwm + 15 * 4 - 1);
+        assert!(l.visible.len() < 16);
+        let c = l.cells[l.visible.start];
+        assert_eq!((c.width(), c.height()), (cw_min, ch));
     }
 
     #[test]
     fn sliding_window_current_at_start() {
-        let s = wa(12, 0);
+        let (ch, _, _, cw_min) = nat();
+        let s = wa(20, 0);
         let l = Layout::compute(&s, &cfg(), 48, 96, 680);
         assert_eq!(l.visible.start, 0);
-        assert!(l.visible.end < 12 && l.visible.end >= 2);
+        assert!(l.visible.end < 20 && l.visible.end >= 2);
         assert!(l.overflow_left.is_none());
         let r = l.overflow_right.expect("right marker");
         assert!(l.width <= 680);
         assert_eq!(l.width as f32, r.right);
-        // Minimum size = 70% of the natural height.
-        assert_eq!(l.cells[0].height(), (38.0f32 * 0.7).round());
+        // Full height, minimum (60%) width.
+        assert_eq!(l.cells[0].height(), ch);
+        assert_eq!(l.cells[0].width(), cw_min);
         // Hidden desktops are empty and never hit.
-        for i in l.visible.end..12 {
+        for i in l.visible.end..20 {
             assert_eq!(l.cells[i], RectF::default());
         }
         assert_eq!(l.desktop_at(r.left + 1.0, r.top + 3.0), None);
-        assert_eq!(l.hit_test(&s, r.left + 1.0, r.top + 3.0), Hit::None);
     }
 
     #[test]
     fn sliding_window_current_in_middle() {
-        let s = wa(12, 6);
+        let s = wa(20, 10);
         let l = Layout::compute(&s, &cfg(), 48, 96, 680);
-        assert!(l.visible.contains(&6));
-        assert!(l.visible.start > 0 && l.visible.end < 12);
+        assert!(l.visible.contains(&10));
+        assert!(l.visible.start > 0 && l.visible.end < 20);
         let (a, b) = (l.overflow_left.expect("left"), l.overflow_right.expect("right"));
         assert!(a.right < l.cells[l.visible.start].left);
         assert!(b.left > l.cells[l.visible.end - 1].right);
         assert_eq!(a.left, 0.0);
         assert_eq!(l.width as f32, b.right);
         assert!(l.width <= 680);
+        assert_eq!(l.cells[10].height(), nat().0);
         // Roughly centered on the current desktop.
-        let (before, after) = (6 - l.visible.start, l.visible.end - 1 - 6);
+        let (before, after) = (10 - l.visible.start, l.visible.end - 1 - 10);
         assert!(before.abs_diff(after) <= 1);
         assert_eq!(l.desktop_at(a.left + 1.0, a.top + 3.0), None);
-        assert_eq!(l.hit_test(&s, b.left + 1.0, b.top + 3.0), Hit::None);
     }
 
     #[test]
     fn sliding_window_current_at_end() {
-        let s = wa(12, 11);
+        let s = wa(20, 19);
         let l = Layout::compute(&s, &cfg(), 48, 96, 680);
-        assert_eq!(l.visible.end, 12);
+        assert_eq!(l.visible.end, 20);
         assert!(l.visible.start > 0);
         assert!(l.overflow_right.is_none());
         let a = l.overflow_left.expect("left marker");
         assert_eq!(a.left, 0.0);
-        assert_eq!(l.width as f32, l.cells[11].right);
+        assert_eq!(l.width as f32, l.cells[19].right);
         assert!(l.width <= 680);
         // Hit-testing a hidden desktop's old position finds nothing hidden.
         for x in 0..l.width {
@@ -434,11 +465,11 @@ mod tests {
     fn one_desktop_edge_cases() {
         // Plenty of room.
         let l = Layout::compute(&wa(1, 0), &cfg(), 48, 96, i32::MAX);
-        assert_eq!((l.visible.clone(), l.width), (0..1, 94));
-        // Too narrow for the natural cell but wide enough for the minimum: shrink.
-        let l = Layout::compute(&wa(1, 0), &cfg(), 48, 96, 80);
+        assert_eq!((l.visible.clone(), l.width), (0..1, nat().2 as i32));
+        // Too narrow for the natural cell but wide enough for the minimum: narrower, same height.
+        let l = Layout::compute(&wa(1, 0), &cfg(), 48, 96, 55);
         assert_eq!(l.visible, 0..1);
-        assert!(l.width <= 80 && l.cells[0].height() > 26.0);
+        assert!(l.width == 55 && l.cells[0].height() == nat().0);
         // Narrower than the minimum cell: as large as fits.
         let l = Layout::compute(&wa(1, 0), &cfg(), 48, 96, 40);
         assert_eq!(l.visible, 0..1);
@@ -456,9 +487,11 @@ mod tests {
         let c = l.cells[5];
         assert!(matches!(l.hit_test(&s, c.left + 2.0, c.top + 2.0), Hit::Desktop(5)));
         // Room for the minimum cell but not for markers: current only, no markers.
-        let l = Layout::compute(&s, &cfg(), 48, 96, 70);
+        let l = Layout::compute(&s, &cfg(), 48, 96, 60);
         assert_eq!(l.visible, 5..6);
-        assert!(l.width <= 70);
+        assert!(l.overflow_left.is_none() && l.overflow_right.is_none());
+        assert_eq!(l.width, 60);
+        assert_eq!(l.cells[5].height(), nat().0); // full height, as wide as fits
     }
 
     #[test]

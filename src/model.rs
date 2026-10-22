@@ -145,7 +145,7 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             spacing: 4.0,
-            vertical_margin: 5.0,
+            vertical_margin: 10.0,
             show_icons: true,
             show_names: false,
         }
