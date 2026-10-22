@@ -175,6 +175,9 @@ pub enum Hit {
 pub struct ViewState {
     pub hover: Option<Hit>,
     pub drag: Option<DragVisual>,
+    /// Draw a rounded Fluent-like plate behind the cells (floating widget mode, where there
+    /// is no taskbar surface underneath). The host pads the layout horizontally for it.
+    pub backplate: bool,
 }
 
 /// A window outline being dragged to another desktop.

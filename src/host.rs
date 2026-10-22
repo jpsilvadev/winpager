@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
@@ -68,6 +69,10 @@ const VERIFY_MS: u32 = 600;
 
 /// Clearance kept between the pager and neighbouring taskbar elements (DIPs).
 const SPAN_GAP_DIP: i32 = 8;
+/// Gap between the default floating position and the taskbar (DIPs), and the minimum margin
+/// kept to the work-area edges when sizing the floating widget.
+const FLOAT_GAP_DIP: i32 = 6;
+const FLOAT_EDGE_MARGIN_DIP: i32 = 12;
 const TASKBAR_BRIDGE_CLASS: &str = "Windows.UI.Composition.DesktopWindowContentBridge";
 
 static CONTROL_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -88,6 +93,14 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
         Ok(mut g) => g.as_mut().map(f),
         Err(_) => None,
     })
+}
+
+/// An Alt + drag move of the floating widget in progress.
+struct MoveState {
+    start_cursor: (i32, i32),
+    start_pos: (i32, i32),
+    /// `cfg.floating_pos` before the move (restored on cancel).
+    orig_cfg_pos: Option<(i32, i32)>,
 }
 
 struct Press {
@@ -131,6 +144,13 @@ struct App {
     space_monitor: Option<SpaceMonitor>,
     space: Option<Space>,
     last_max_width: (i32, i32),
+    /// DPI used by the last layout (the taskbar's when embedded, the widget's monitor when floating).
+    dpi: u32,
+    /// Floating widget being moved with Alt + left-drag.
+    moving: Option<MoveState>,
+    /// Test aid (`WINPAGER_TEST_ALT=1`): treat every press as Alt-down and derive the cursor
+    /// position from the mouse message instead of `GetCursorPos`.
+    test_alt: bool,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -235,6 +255,9 @@ fn run_inner(cfg: Config) -> anyhow::Result<()> {
             space_monitor: None,
             space: None,
             last_max_width: (-1, -1),
+            dpi: 96,
+            moving: None,
+            test_alt: std::env::var_os("WINPAGER_TEST_ALT").is_some(),
         };
         APP.with(|c| *c.borrow_mut() = Some(app));
 
@@ -332,6 +355,7 @@ fn destroy_pager(app: &mut App) {
         remove_wheel_hook(app);
         app.press = None;
         app.tracking = false;
+        app.moving = None;
         app.view = ViewState::default();
         app.tooltip_key = None;
         if let Some(t) = app.tooltip.as_mut() {
@@ -366,7 +390,7 @@ fn rebuild_pager(app: &mut App) {
     let mut created = None;
     if embedded(app) {
         let rect = pager_screen_rect(app, &tb, app.layout.width);
-        match create_pager_window(&tb, rect, true) {
+        match create_pager_window(&tb, rect, true, false) {
             Ok(h) => {
                 created = Some((h, rect));
                 crate::wlog!("created embedded pager {:?} client rect {:?}", h.0, taskbar::screen_to_client(tb.hwnd(), &rect));
@@ -374,12 +398,13 @@ fn rebuild_pager(app: &mut App) {
             Err(e) => {
                 crate::wlog!("embedded pager creation failed: {e:#}; falling back to floating");
                 app.effective = Placement::Floating;
+                relayout(app); // floating layout: backplate padding, work-area limit
             }
         }
     }
     if created.is_none() {
         let rect = pager_screen_rect(app, &tb, app.layout.width);
-        match create_pager_window(&tb, rect, false) {
+        match create_pager_window(&tb, rect, false, app.cfg.floating_topmost) {
             Ok(h) => created = Some((h, rect)),
             Err(e) => crate::wlog!("floating pager creation failed: {e:#}"),
         }
@@ -389,6 +414,10 @@ fn rebuild_pager(app: &mut App) {
     PAGER_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
     app.pager_rect = rect;
     store_pager_rect(&rect);
+    // A floating window may be on a monitor with another DPI than the taskbar's.
+    if !embedded(app) && float_dpi(app) != app.dpi {
+        relayout(app);
+    }
     apply_geometry(app, true);
     present(app);
     if embedded(app) {
@@ -398,7 +427,7 @@ fn rebuild_pager(app: &mut App) {
     }
 }
 
-fn create_pager_window(tb: &TaskbarInfo, rect: RectI, embedded: bool) -> anyhow::Result<HWND> {
+fn create_pager_window(tb: &TaskbarInfo, rect: RectI, embedded: bool, topmost: bool) -> anyhow::Result<HWND> {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
         if embedded {
@@ -420,7 +449,10 @@ fn create_pager_window(tb: &TaskbarInfo, rect: RectI, embedded: bool) -> anyhow:
             Ok(h)
         } else {
             let h = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE
+                    | if topmost { WS_EX_TOPMOST } else { WINDOW_EX_STYLE(0) },
                 PAGER_CLASS,
                 w!("WinPager"),
                 WS_POPUP,
@@ -482,9 +514,75 @@ fn current_span(app: &App) -> Option<(i32, i32)> {
     ))
 }
 
+/// DPI of the monitor the floating widget is on (the taskbar's while there is no window yet).
+fn float_dpi(app: &App) -> u32 {
+    let fallback = app.taskbar.map_or(96, |t| t.dpi);
+    if app.pager.is_invalid() {
+        return fallback;
+    }
+    match unsafe { GetDpiForWindow(app.pager) } {
+        0 => fallback,
+        d => d,
+    }
+}
+
+/// Work area of the monitor the floating widget is (or will be) on.
+fn floating_work_area(app: &App, height: i32) -> Option<RectI> {
+    let (x, y) = match (app.cfg.floating_pos, app.taskbar) {
+        (Some(p), _) => p,
+        (None, Some(tb)) => floating_origin(app, &tb, 1, height),
+        (None, None) => (0, 0),
+    };
+    taskbar::work_area_near(&RectI { left: x, top: y, right: x + 1, bottom: y + height })
+}
+
+/// Floating widget height: the taskbar's height, converted to the widget's DPI.
+fn float_height(tb: &TaskbarInfo, dpi: u32) -> i32 {
+    (tb.rect.height() * dpi as i32 / tb.dpi.max(1) as i32).max(16)
+}
+
+/// Top-left corner of the floating widget before clamping: the saved position, else the
+/// default spot above the taskbar.
+fn floating_origin(app: &App, tb: &TaskbarInfo, width: i32, height: i32) -> (i32, i32) {
+    if let Some(p) = app.cfg.floating_pos {
+        return p;
+    }
+    let scale = |v: i32| v * app.dpi as i32 / 96;
+    let tray_left = app
+        .space
+        .and_then(|s| s.tray_left)
+        .or(tb.notify.map(|n| n.left))
+        .unwrap_or(tb.rect.right);
+    taskbar::default_floating_pos(
+        &tb.rect,
+        tb.edge,
+        app.cfg.anchor,
+        tray_left,
+        scale(app.cfg.offset),
+        scale(FLOAT_GAP_DIP),
+        width,
+        height,
+    )
+}
+
+/// Screen rect of the floating widget, kept inside the nearest monitor's work area.
+fn floating_rect(app: &App, tb: &TaskbarInfo, width: i32) -> RectI {
+    let height = if app.layout.height > 0 { app.layout.height } else { float_height(tb, app.dpi) };
+    let (x, y) = floating_origin(app, tb, width, height);
+    let probe = RectI { left: x, top: y, right: x + width, bottom: y + height };
+    let (x, y) = match taskbar::work_area_near(&probe) {
+        Some(work) => taskbar::clamp_into(x, y, width, height, &work),
+        None => (x, y),
+    };
+    RectI { left: x, top: y, right: x + width, bottom: y + height }
+}
+
 /// Screen rect for a pager `width` pixels wide.
 fn pager_screen_rect(app: &App, tb: &TaskbarInfo, width: i32) -> RectI {
     let width = width.max(1);
+    if !embedded(app) {
+        return floating_rect(app, tb, width);
+    }
     match current_span(app) {
         Some(span) => {
             let (l, r) = taskbar_space::place_in_span(app.cfg.anchor == Anchor::Tray, span, width);
@@ -518,10 +616,7 @@ fn apply_geometry(app: &mut App, force: bool) {
                 c.height(),
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
-        } else if tb.is_collapsed() {
-            let _ = ShowWindow(app.pager, SW_HIDE);
-            Ok(())
-        } else {
+        } else if app.cfg.floating_topmost {
             SetWindowPos(
                 app.pager,
                 HWND_TOPMOST,
@@ -530,6 +625,17 @@ fn apply_geometry(app: &mut App, force: bool) {
                 rect.width(),
                 rect.height(),
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        } else {
+            // Not top-most: leave the z-order alone.
+            SetWindowPos(
+                app.pager,
+                None,
+                rect.left,
+                rect.top,
+                rect.width(),
+                rect.height(),
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
             )
         };
         if let Err(e) = r {
@@ -577,12 +683,28 @@ fn collect_snapshot(app: &mut App) -> bool {
 
 /// Recompute the layout from the cached snapshot and fix up everything that depends on it.
 fn relayout(app: &mut App) {
-    let (height, dpi) = match &app.taskbar {
-        Some(tb) => (tb.rect.height().max(16), tb.dpi),
-        None => (48, 96),
+    let (height, dpi, max_width, pad) = if embedded(app) {
+        let (height, dpi) = match &app.taskbar {
+            Some(tb) => (tb.rect.height().max(16), tb.dpi),
+            None => (48, 96),
+        };
+        (height, dpi, current_span(app).map_or(i32::MAX, |(l, r)| (r - l).max(0)), 0)
+    } else {
+        // Free widget: same cell height as in the taskbar, limited only by the monitor's
+        // work area; horizontal padding for the backplate.
+        let dpi = float_dpi(app);
+        let height = app.taskbar.map_or(48, |tb| float_height(&tb, dpi));
+        let scale = |v: f32| (v * dpi as f32 / 96.0).round() as i32;
+        let pad = scale(crate::layout::PLATE_PAD_DIP);
+        let work_w = floating_work_area(app, height).map_or(i32::MAX / 2, |w| w.width());
+        let max = (work_w - 2 * scale(FLOAT_EDGE_MARGIN_DIP as f32) - 2 * pad).max(0);
+        (height, dpi, max, pad)
     };
-    let max_width = current_span(app).map_or(i32::MAX, |(l, r)| (r - l).max(0));
+    app.dpi = dpi;
     app.layout = Layout::compute(&app.snapshot, &app.cfg.layout, height, dpi, max_width);
+    if pad > 0 {
+        app.layout.pad_x(pad);
+    }
     if (max_width, app.layout.width) != app.last_max_width {
         app.last_max_width = (max_width, app.layout.width);
         crate::wlog!(
@@ -627,7 +749,7 @@ fn refresh(app: &mut App) {
         relayout(app);
         present(app);
     }
-    if !embedded(app) && !app.pager.is_invalid() {
+    if !embedded(app) && app.cfg.floating_topmost && !app.pager.is_invalid() {
         assert_topmost(app);
     }
 }
@@ -636,6 +758,7 @@ fn present(app: &mut App) {
     if app.pager.is_invalid() || app.layout.cells.is_empty() {
         return;
     }
+    app.view.backplate = !embedded(app);
     let r = app.renderer.present(
         app.pager,
         &app.snapshot,
@@ -704,26 +827,42 @@ fn poll(app: &mut App) {
     if embedded(app) {
         ensure_above_bridge(app);
     } else {
-        // A floating top-most pager must not cover full-screen apps.
-        let fullscreen = unsafe {
-            use windows::Win32::UI::Shell::{
-                QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
+        // Free widget: follow DPI changes of its monitor and stay inside the work area
+        // (a monitor may have been unplugged or rearranged).
+        if app.moving.is_none() {
+            if float_dpi(app) != app.dpi {
+                relayout(app);
+                present(app);
+            } else {
+                apply_geometry(app, false);
+            }
+        }
+        if app.cfg.floating_topmost {
+            // A top-most widget must not cover full-screen apps.
+            let fullscreen = unsafe {
+                use windows::Win32::UI::Shell::{
+                    QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
+                };
+                matches!(
+                    SHQueryUserNotificationState(),
+                    Ok(s) if s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE
+                )
             };
-            matches!(
-                SHQueryUserNotificationState(),
-                Ok(s) if s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE
-            )
-        };
-        if fullscreen {
-            unsafe {
-                let _ = ShowWindow(app.pager, SW_HIDE);
+            if fullscreen {
+                unsafe {
+                    let _ = ShowWindow(app.pager, SW_HIDE);
+                }
+            } else {
+                unsafe {
+                    let _ = ShowWindow(app.pager, SW_SHOWNOACTIVATE);
+                }
+                assert_topmost(app);
             }
-        } else {
-            let tb_hidden = app.taskbar.is_some_and(|t| t.is_collapsed());
+        } else if unsafe { !IsWindowVisible(app.pager).as_bool() } {
+            // Not top-most (any more): make sure a fullscreen auto-hide did not leave it hidden.
             unsafe {
-                let _ = ShowWindow(app.pager, if tb_hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
+                let _ = ShowWindow(app.pager, SW_SHOWNOACTIVATE);
             }
-            assert_topmost(app);
         }
     }
     // Remove a stray wheel hook when the cursor is gone.
@@ -832,6 +971,7 @@ fn on_verify_timer(app: &mut App) {
 
 fn apply_config(app: &mut App, new: Config) {
     let placement_changed = new.placement != app.cfg.placement;
+    let topmost_changed = new.floating_topmost != app.cfg.floating_topmost;
     app.cfg = new;
     if placement_changed {
         app.effective = app.cfg.placement;
@@ -840,7 +980,96 @@ fn apply_config(app: &mut App, new: Config) {
     } else {
         relayout(app);
         present(app);
+        if topmost_changed {
+            apply_topmost(app);
+        }
     }
+}
+
+/// Apply `floating_topmost` to the live floating window (adds or removes WS_EX_TOPMOST).
+fn apply_topmost(app: &mut App) {
+    if embedded(app) || app.pager.is_invalid() {
+        return;
+    }
+    unsafe {
+        let after = if app.cfg.floating_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        if let Err(e) = SetWindowPos(app.pager, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) {
+            crate::wlog!("SetWindowPos(topmost={}) failed: {e}", app.cfg.floating_topmost);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Moving the floating widget (Alt + left-drag)
+// ---------------------------------------------------------------------------------------
+
+fn alt_down(app: &App) -> bool {
+    app.test_alt || unsafe { GetKeyState(VK_MENU.0 as i32) } < 0
+}
+
+/// Cursor position in screen coordinates for a mouse message with client position `(x, y)`.
+fn cursor_screen(app: &App, hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
+    let mut p = POINT { x, y };
+    unsafe {
+        if app.test_alt {
+            // Synthetic (posted) messages: the message position is all we have.
+            let _ = ClientToScreen(hwnd, &mut p);
+        } else {
+            let _ = GetCursorPos(&mut p);
+        }
+    }
+    (p.x, p.y)
+}
+
+fn begin_move(app: &mut App, hwnd: HWND, cursor: (i32, i32)) {
+    hide_tooltip(app);
+    app.view.hover = None;
+    app.press = None;
+    app.moving = Some(MoveState {
+        start_cursor: cursor,
+        start_pos: (app.pager_rect.left, app.pager_rect.top),
+        orig_cfg_pos: app.cfg.floating_pos,
+    });
+    unsafe {
+        SetCapture(hwnd);
+        SetTimer(app.control, TIMER_DRAG, 50, None);
+    }
+    crate::wlog!("floating move started at {:?} from {:?}", cursor, app.pager_rect);
+    present(app);
+}
+
+fn update_move(app: &mut App, cursor: (i32, i32)) {
+    let Some(m) = &app.moving else { return };
+    let pos = (m.start_pos.0 + cursor.0 - m.start_cursor.0, m.start_pos.1 + cursor.1 - m.start_cursor.1);
+    app.cfg.floating_pos = Some(pos);
+    apply_geometry(app, false); // clamps into the work area
+    // The new spot may be on a monitor with another DPI.
+    if float_dpi(app) != app.dpi {
+        relayout(app);
+        present(app);
+    }
+}
+
+/// Finish the move: commit saves the position, otherwise revert to the start position.
+fn end_move(app: &mut App, commit: bool) {
+    let Some(m) = app.moving.take() else { return };
+    unsafe {
+        let _ = KillTimer(app.control, TIMER_DRAG);
+        if GetCapture() == app.pager {
+            let _ = ReleaseCapture(); // re-entrant WM_CAPTURECHANGED finds `moving` cleared
+        }
+    }
+    if commit {
+        let pos = (app.pager_rect.left, app.pager_rect.top);
+        app.cfg.floating_pos = Some(pos);
+        save_config(app);
+        crate::wlog!("floating move finished; saved position {:?}", pos);
+    } else {
+        app.cfg.floating_pos = m.orig_cfg_pos;
+        apply_geometry(app, false);
+        crate::wlog!("floating move cancelled; back at {:?}", (app.pager_rect.left, app.pager_rect.top));
+    }
+    present(app);
 }
 
 fn save_config(app: &mut App) {
@@ -976,9 +1205,14 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                     }
                     TIMER_DRAG => {
                         with_app(|app| {
-                            if app.view.drag.is_some() && GetAsyncKeyState(VK_ESCAPE.0 as i32) < 0 {
-                                crate::wlog!("drag cancelled with Esc");
-                                cancel_press(app);
+                            if GetAsyncKeyState(VK_ESCAPE.0 as i32) < 0 {
+                                if app.moving.is_some() {
+                                    crate::wlog!("move cancelled with Esc");
+                                    end_move(app, false);
+                                } else if app.view.drag.is_some() {
+                                    crate::wlog!("drag cancelled with Esc");
+                                    cancel_press(app);
+                                }
                             }
                         });
                     }
@@ -1105,6 +1339,15 @@ unsafe extern "system" fn pager_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_NCHITTEST => LRESULT(HTCLIENT as isize),
             WM_ERASEBKGND => LRESULT(1),
+            WM_DPICHANGED => {
+                // The floating widget moved to a monitor with another DPI. Re-layout at the
+                // new scale (position is kept; the suggested rect is not applied).
+                with_app(|app| {
+                    relayout(app);
+                    present(app);
+                });
+                LRESULT(0)
+            }
             WM_SETCURSOR => {
                 // Keep the arrow cursor; do not let the parent decide.
                 if let Ok(c) = LoadCursorW(None, IDC_ARROW) {
@@ -1136,6 +1379,12 @@ unsafe extern "system" fn pager_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             WM_LBUTTONDOWN => {
                 let (x, y) = lparam_xy(lparam);
                 with_app(|app| {
+                    if !embedded(app) && alt_down(app) {
+                        // Alt + left press moves the floating widget (no click, no outline drag).
+                        let c = cursor_screen(app, hwnd, x, y);
+                        begin_move(app, hwnd, c);
+                        return;
+                    }
                     hide_tooltip(app);
                     let hit = app.layout.hit_test(&app.snapshot, x as f32, y as f32);
                     app.press = Some(Press { x: x as f32, y: y as f32, hit, dragging: false });
@@ -1145,6 +1394,17 @@ unsafe extern "system" fn pager_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             WM_LBUTTONUP => {
                 let (x, y) = lparam_xy(lparam);
+                if with_app(|app| {
+                    if app.moving.is_some() {
+                        end_move(app, true);
+                        true
+                    } else {
+                        false
+                    }
+                }) == Some(true)
+                {
+                    return LRESULT(0);
+                }
                 let (press, drag) = with_app(|app| (app.press.take(), app.view.drag.take()))
                     .unwrap_or((None, None));
                 if press.is_some() {
@@ -1157,7 +1417,9 @@ unsafe extern "system" fn pager_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             WM_CAPTURECHANGED => {
                 // Capture lost while a press/drag is active (not a normal button release).
                 with_app(|app| {
-                    if app.press.is_some() || app.view.drag.is_some() {
+                    if app.moving.is_some() {
+                        end_move(app, false);
+                    } else if app.press.is_some() || app.view.drag.is_some() {
                         crate::wlog!("capture lost; cancelling press/drag");
                         cancel_press(app);
                     }
@@ -1165,7 +1427,12 @@ unsafe extern "system" fn pager_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
                 LRESULT(0)
             }
             WM_CANCELMODE => {
-                with_app(cancel_press);
+                with_app(|app| {
+                    if app.moving.is_some() {
+                        end_move(app, false);
+                    }
+                    cancel_press(app);
+                });
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_RBUTTONUP => {
@@ -1203,6 +1470,11 @@ unsafe extern "system" fn pager_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
 }
 
 fn on_mouse_move(app: &mut App, hwnd: HWND, x: i32, y: i32) {
+    if app.moving.is_some() {
+        let c = cursor_screen(app, hwnd, x, y);
+        update_move(app, c);
+        return;
+    }
     unsafe {
         if !app.tracking {
             let mut t = TRACKMOUSEEVENT {
@@ -1482,6 +1754,8 @@ fn show_context_menu(pager: HWND, x: i32, y: i32) {
             show_names: app.cfg.layout.show_names,
             placement: app.cfg.placement,
             chevron: app.cfg.chevron,
+            floating: app.cfg.placement == Placement::Floating,
+            floating_topmost: app.cfg.floating_topmost,
             autostart: menu::autostart_enabled(),
         };
         Some((app.control, st))
@@ -1550,6 +1824,20 @@ fn handle_command(owner: HWND, cmd: Cmd, target: Option<usize>) {
                 app.cfg.layout.show_names = !app.cfg.layout.show_names;
                 save_config(app);
                 present(app);
+            });
+        }
+        Cmd::Topmost => {
+            with_app(|app| {
+                app.cfg.floating_topmost = !app.cfg.floating_topmost;
+                save_config(app);
+                apply_topmost(app);
+            });
+        }
+        Cmd::ResetFloatingPos => {
+            with_app(|app| {
+                app.cfg.floating_pos = None;
+                save_config(app);
+                apply_geometry(app, false);
             });
         }
         Cmd::Chevron(m) => {

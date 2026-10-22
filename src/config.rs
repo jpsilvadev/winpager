@@ -43,6 +43,11 @@ pub struct Config {
     pub invert_scroll: bool,
     /// What clicking an overflow chevron does.
     pub chevron: ChevronMode,
+    /// Floating mode: keep the widget above other windows.
+    pub floating_topmost: bool,
+    /// Floating mode: top-left corner in physical screen pixels; `None` = the default spot
+    /// just above the taskbar, right-aligned with the tray.
+    pub floating_pos: Option<(i32, i32)>,
 }
 
 impl Default for Config {
@@ -55,6 +60,8 @@ impl Default for Config {
             wrap_scroll: false,
             invert_scroll: false,
             chevron: ChevronMode::Step,
+            floating_topmost: true,
+            floating_pos: None,
         }
     }
 }
@@ -127,6 +134,21 @@ mod tests {
         let c: Config = toml::from_str("chevron = \"jump\"").unwrap();
         assert_eq!(c.chevron, ChevronMode::Jump);
         assert!(toml::to_string(&Config::default()).unwrap().contains("chevron = \"step\""));
+    }
+
+    #[test]
+    fn floating_options_roundtrip_and_old_files_still_load() {
+        // An older file without the floating keys keeps working.
+        let c: Config = toml::from_str("placement = \"floating\"\n[layout]\nspacing = 3.0\n").unwrap();
+        assert!(c.floating_topmost);
+        assert_eq!(c.floating_pos, None);
+        let c = Config { floating_pos: Some((-120, 800)), floating_topmost: false, ..Config::default() };
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.floating_pos, Some((-120, 800)));
+        assert!(!back.floating_topmost);
+        // `None` is simply omitted.
+        assert!(!toml::to_string_pretty(&Config::default()).unwrap().contains("floating_pos"));
     }
 
     #[test]
