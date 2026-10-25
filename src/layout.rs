@@ -40,8 +40,8 @@ impl Layout {
     /// the desktop count and the screen aspect ratio, but never exceeds `max_width_px`
     /// (pass `i32::MAX` for no limit).
     ///
-    /// 1. Natural size: cell height = `height_px` minus margins, cell width follows the
-    ///    screen aspect ratio.
+    /// 1. Natural size: cell height = `height_px` minus margins (or `cell_height`), cell
+    ///    width follows the screen aspect ratio (or `cell_width`).
     /// 2. If all cells do not fit, narrow every cell (width only: the height and top stay)
     ///    down to `LayoutConfig::min_cell_width` of the natural width.
     /// 3. If they still do not fit, show a sliding window of `k` desktops at full height and
@@ -83,8 +83,8 @@ impl Layout {
         let gap = (cfg.spacing.max(0.0) * scale).round() as i32;
         let marker_w = ((OVERFLOW_MARKER_DIP * scale).round() as i32).max(4);
 
-        let aspect = snapshot.screen.width().max(1) as f32 / snapshot.screen.height().max(1) as f32;
-        let cw_for = |ch: i32| ((ch as f32 * aspect).round() as i32).max(1);
+        // A configured size is used when it is a positive number; anything else means "auto".
+        let fixed = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0).map(|v| ((v * scale).round() as i32).max(1));
         let n_i = n as i32;
         // Width of `k` cells of width `cw` plus `markers` marker regions.
         let strip_w = |k: i32, cw: i32, markers: i32| {
@@ -93,8 +93,16 @@ impl Layout {
                 .saturating_add(markers * (marker_w + gap))
         };
 
-        let ch_nat = (height - 2 * margin).max(1);
-        let cw_nat = cw_for(ch_nat);
+        let ch_nat = match fixed(cfg.cell_height) {
+            Some(h) => h.min(height),
+            None => (height - 2 * margin).max(1),
+        };
+        let cw_nat = fixed(cfg.cell_width).unwrap_or_else(|| {
+            let screen_aspect = snapshot.screen.width().max(1) as f32 / snapshot.screen.height().max(1) as f32;
+            ((ch_nat as f32 * screen_aspect).round() as i32).max(1)
+        });
+        // Natural cell shape, kept when the cell has to be scaled down as a whole (step 4).
+        let aspect = cw_nat as f32 / ch_nat as f32;
         // Tolerate out-of-range or non-finite config values.
         let frac = if cfg.min_cell_width.is_finite() { cfg.min_cell_width } else { DEFAULT_MIN_CELL_WIDTH }
             .clamp(MIN_CELL_WIDTH_RANGE.0, MIN_CELL_WIDTH_RANGE.1);
@@ -124,7 +132,7 @@ impl Layout {
             (ch_nat, max_w.min(cw_nat))
         } else if max_w >= 1 {
             let ch = ((max_w as f32 / aspect).floor() as i32).clamp(1, ch_nat);
-            (ch, cw_for(ch).min(max_w))
+            (ch, ((ch as f32 * aspect).round() as i32).clamp(1, max_w))
         } else {
             return layout; // nothing fits at all: empty strip, nothing visible
         };
@@ -287,12 +295,14 @@ mod tests {
         v.fract() == 0.0
     }
 
+    /// Test geometry, independent of the shipped defaults: 4 px gaps and 10 px margins
+    /// (28 px cells in a 48 px taskbar), auto cell size.
     fn cfg() -> LayoutConfig {
-        LayoutConfig::default()
+        LayoutConfig { spacing: 4.0, vertical_margin: 10.0, ..LayoutConfig::default() }
     }
 
     /// Natural geometry for a 48 px / 100% DPI taskbar on the 3440x1392 work area, derived
-    /// from the default config: (cell height, top, cell width, minimum cell width).
+    /// from the test config: (cell height, top, cell width, minimum cell width).
     fn nat() -> (f32, f32, f32, f32) {
         let m = cfg().vertical_margin.round();
         let ch = 48.0 - 2.0 * m;
@@ -432,7 +442,7 @@ mod tests {
 
     #[test]
     fn floor_of_one_never_shrinks() {
-        let cfg = LayoutConfig { min_cell_width: 1.0, ..LayoutConfig::default() };
+        let cfg = LayoutConfig { min_cell_width: 1.0, ..cfg() };
         let (_, _, cw_nat, _) = nat();
         let s = wa(11, 5);
         // 11 natural cells need 11*cw + 40 px; one pixel less and it slides immediately.
@@ -448,13 +458,13 @@ mod tests {
     fn out_of_range_floor_is_tolerated() {
         let s = wa(11, 5);
         for v in [-1.0f32, 0.0, 0.1, 5.0, f32::NAN, f32::INFINITY] {
-            let cfg = LayoutConfig { min_cell_width: v, ..LayoutConfig::default() };
+            let cfg = LayoutConfig { min_cell_width: v, ..cfg() };
             let l = Layout::compute(&s, &cfg, 48, 96, 634);
             assert!(l.width <= 634, "floor {v}");
             assert!(l.visible.contains(&5), "floor {v}");
         }
         // Below the range behaves like 0.3, above like 1.0.
-        let at = |v| Layout::compute(&s, &LayoutConfig { min_cell_width: v, ..LayoutConfig::default() }, 48, 96, 634);
+        let at = |v| Layout::compute(&s, &LayoutConfig { min_cell_width: v, ..cfg() }, 48, 96, 634);
         assert_eq!(at(0.0).cells, at(0.3).cells);
         assert_eq!(at(5.0).cells, at(1.0).cells);
     }
@@ -682,5 +692,54 @@ mod tests {
         let l = Layout::compute(&s, &cfg(), 48, 96, i32::MAX);
         let c1 = l.cells[1];
         assert_eq!(l.hit_test(&s, c1.left + 3.0, c1.top + 3.0), Hit::Desktop(1));
+    }
+
+    #[test]
+    fn fixed_cell_height_overrides_margin_and_is_centered() {
+        let s = wa(7, 0);
+        let c = LayoutConfig { cell_height: Some(36.0), ..cfg() };
+        let l = Layout::compute(&s, &c, 48, 96, i32::MAX);
+        let c0 = l.cells[0];
+        assert_eq!((c0.height(), c0.top), (36.0, 6.0));
+        assert_eq!(c0.width(), (36.0f32 * 3440.0 / 1392.0).round());
+        // Scales with DPI, and never exceeds the taskbar height.
+        let l = Layout::compute(&s, &c, 72, 144, i32::MAX);
+        assert_eq!((l.cells[0].height(), l.cells[0].top), (54.0, 9.0));
+        let c = LayoutConfig { cell_height: Some(200.0), ..cfg() };
+        let l = Layout::compute(&s, &c, 48, 96, i32::MAX);
+        assert_eq!((l.cells[0].height(), l.cells[0].top), (48.0, 0.0));
+    }
+
+    #[test]
+    fn fixed_cell_width_and_windows_follow() {
+        let s = wa(7, 0);
+        let c = LayoutConfig { cell_width: Some(40.0), ..cfg() };
+        let l = Layout::compute(&s, &c, 48, 96, i32::MAX);
+        assert_eq!((l.cells[0].width(), l.cells[0].height()), (40.0, nat().0));
+        assert_eq!(l.width, 7 * 40 + 6 * 4);
+        // A full-screen window fills the cell whatever its shape.
+        let r = l.map_window(0, &RectI { left: 0, top: 0, right: 3440, bottom: 1392 });
+        assert_eq!((r.width(), r.height()), (40.0, nat().0));
+        // Still narrows (down to the floor) when the strip does not fit.
+        let l = Layout::compute(&s, &c, 48, 96, 7 * 36 + 6 * 4);
+        assert_eq!((l.visible.clone(), l.cells[0].width()), (0..7, 36.0));
+    }
+
+    #[test]
+    fn non_positive_cell_sizes_mean_auto() {
+        let s = wa(7, 0);
+        let auto = Layout::compute(&s, &cfg(), 48, 96, i32::MAX);
+        for v in [0.0f32, -5.0, f32::NAN, f32::INFINITY] {
+            let c = LayoutConfig { cell_height: Some(v), cell_width: Some(v), ..cfg() };
+            assert_eq!(Layout::compute(&s, &c, 48, 96, i32::MAX).cells, auto.cells, "{v}");
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_touching_cells() {
+        // Defaults: no gap, 7 px margins -> 34 px cells in a 48 px taskbar.
+        let l = Layout::compute(&wa(7, 0), &LayoutConfig::default(), 48, 96, i32::MAX);
+        assert_eq!((l.cells[0].height(), l.cells[0].top), (34.0, 7.0));
+        assert_eq!(l.cells[1].left, l.cells[0].right);
     }
 }

@@ -107,6 +107,12 @@ impl Config {
         };
         self.layout.spacing = self.layout.spacing.clamp(0.0, 64.0);
         self.layout.vertical_margin = self.layout.vertical_margin.clamp(0.0, 64.0);
+        // Sizes: a positive number is used (clamped), anything else means "auto".
+        let size = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0).map(|v| v.clamp(1.0, 1024.0));
+        self.layout.cell_height = size(self.layout.cell_height);
+        self.layout.cell_width = size(self.layout.cell_width);
+        self.layout.corner_radius =
+            if self.layout.corner_radius.is_finite() { self.layout.corner_radius.clamp(0.0, 64.0) } else { 0.0 };
         self.offset = self.offset.clamp(-4000, 4000);
         self
     }
@@ -161,5 +167,25 @@ mod tests {
         }
         c.layout.min_cell_width = f32::NAN;
         assert_eq!(c.sanitized().layout.min_cell_width, 0.8);
+    }
+
+    #[test]
+    fn cell_size_and_corner_radius() {
+        // Defaults: auto size, square corners; `None` sizes are omitted from the file.
+        let d = Config::default();
+        assert_eq!((d.layout.cell_height, d.layout.cell_width, d.layout.corner_radius), (None, None, 0.0));
+        let text = toml::to_string_pretty(&d).unwrap();
+        // (Line starts: `min_cell_width` also contains "cell_width".)
+        assert!(!text.contains("\ncell_height") && !text.contains("\ncell_width"));
+        let c: Config = toml::from_str("[layout]\ncell_height = 32.0\ncell_width = 60\ncorner_radius = 4\n").unwrap();
+        let c = c.sanitized();
+        assert_eq!((c.layout.cell_height, c.layout.cell_width, c.layout.corner_radius), (Some(32.0), Some(60.0), 4.0));
+        // Zero, negative and non-finite sizes mean auto; the radius is clamped.
+        let mut c = Config::default();
+        c.layout.cell_height = Some(0.0);
+        c.layout.cell_width = Some(f32::NAN);
+        c.layout.corner_radius = -3.0;
+        let c = c.sanitized();
+        assert_eq!((c.layout.cell_height, c.layout.cell_width, c.layout.corner_radius), (None, None, 0.0));
     }
 }

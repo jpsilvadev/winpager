@@ -76,8 +76,11 @@ floating_topmost = true
 # floating_pos = [x, y]    # floating mode: top-left corner, physical pixels (set by Alt + drag)
 
 [layout]
-spacing = 4.0              # gap between miniatures, DIPs
-vertical_margin = 10.0     # space above and below the miniatures; larger = smaller miniatures
+spacing = 0.0              # gap between miniatures, DIPs
+vertical_margin = 7.0      # space above and below the miniatures; larger = smaller miniatures
+# cell_height = 34.0       # fixed miniature height, DIPs (overrides vertical_margin; centered)
+# cell_width = 84.0        # fixed miniature width, DIPs (default: follows the screen's shape)
+corner_radius = 0.0        # rounded corners of the miniatures, DIPs; 0 = square
 show_icons = true
 show_names = false
 min_cell_width = 0.8       # narrowest miniature (fraction of normal width) before sliding; 0.3–1.0

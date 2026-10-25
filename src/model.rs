@@ -133,8 +133,17 @@ impl Snapshot {
 pub struct LayoutConfig {
     /// Gap between cells.
     pub spacing: f32,
-    /// Margin above and below the grid inside the taskbar.
+    /// Margin above and below the grid inside the taskbar. Ignored when `cell_height` is set.
     pub vertical_margin: f32,
+    /// Fixed cell height (at most the taskbar height, centered). `None` = the taskbar height
+    /// minus `vertical_margin` above and below.
+    pub cell_height: Option<f32>,
+    /// Fixed natural cell width (cells still narrow when they do not fit, see
+    /// `min_cell_width`). `None` = follows the screen aspect ratio.
+    pub cell_width: Option<f32>,
+    /// Corner radius of the cells; window outlines and overflow markers get a proportional
+    /// one. 0 = square corners.
+    pub corner_radius: f32,
     /// Draw app icons inside window outlines.
     pub show_icons: bool,
     /// Draw the desktop name/number inside each cell (behind the windows).
@@ -148,8 +157,11 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            spacing: 4.0,
-            vertical_margin: 10.0,
+            spacing: 0.0,
+            vertical_margin: 7.0,
+            cell_height: None,
+            cell_width: None,
+            corner_radius: 0.0,
             show_icons: true,
             show_names: false,
             min_cell_width: 0.8,

@@ -614,9 +614,9 @@ impl Frame<'_> {
         hovered: bool,
         drag: Option<DragVisual>,
     ) {
-        let (s, th) = (self.scale, self.theme);
+        let th = self.theme;
         let cell = self.layout.cells[d];
-        let radius = (4.0 * s).round();
+        let radius = self.cell_radius().min(cell.width().min(cell.height()) * 0.5);
         let is_current = d == self.snapshot.current;
 
         // Background.
@@ -656,7 +656,7 @@ impl Frame<'_> {
             };
             // Windows on the current desktop pick up a hint of the accent color.
             let fill = if is_current && !fg { fill.mix(th.accent.with_alpha(1.0), 0.14) } else { fill };
-            let wr = (1.5 * s).min(r.width().min(r.height()) * 0.25).floor();
+            let wr = self.window_radius(r);
             self.pen.fill(r, wr, fill.faded(fade));
             self.pen.border(r, wr, 1.0, border.faded(fade));
             if self.cfg.show_icons
@@ -682,6 +682,18 @@ impl Frame<'_> {
         } else {
             self.pen.border(cell, radius, 1.0, th.cell_border);
         }
+    }
+
+    /// Configured cell corner radius in pixels (0 = square).
+    fn cell_radius(&self) -> f32 {
+        let r = self.cfg.corner_radius;
+        if r.is_finite() { (r.max(0.0) * self.scale).round() } else { 0.0 }
+    }
+
+    /// Corner radius for a window outline: proportional to the cell radius (the old 1.5 vs 4
+    /// DIP look), and never more than a quarter of the outline's short side.
+    fn window_radius(&self, r: RectF) -> f32 {
+        (self.cell_radius() * 0.375).min(r.width().min(r.height()) * 0.25).floor()
     }
 
     /// Window outline in pixel-snapped cell coordinates (not clipped), at least 3x3.
@@ -786,7 +798,7 @@ impl Frame<'_> {
     /// desktops (`dir` = -1 for left, +1 for right).
     fn draw_overflow_marker(&self, r: RectF, dir: f32, hovered: bool) {
         let s = self.scale;
-        let radius = (4.0 * s).round().min(r.width() * 0.5);
+        let radius = self.cell_radius().min(r.width() * 0.5);
         self.pen.fill(r, radius, self.theme.cell_fill);
         if hovered {
             // Same treatment as a hovered cell.
@@ -821,7 +833,7 @@ impl Frame<'_> {
         let left = (drag.cursor.0 - drag.grab_offset.0).round();
         let top = (drag.cursor.1 - drag.grab_offset.1).round();
         let r = RectF { left, top, right: left + ow, bottom: top + oh };
-        let wr = (1.5 * self.scale).min(ow.min(oh) * 0.25).floor();
+        let wr = self.window_radius(r);
         self.pen.fill(r, wr, self.theme.ghost_fill);
         self.pen.border(r, wr, 1.0, self.theme.ghost_border);
         if self.cfg.show_icons
