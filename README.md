@@ -6,9 +6,7 @@ It shows one miniature per virtual desktop, right inside the taskbar. Each minia
 the outlines of that desktop's windows at their real positions, with app icons. The current
 desktop is highlighted in your accent color.
 
-[![WinPager demo video](docs/demo.jpg)](docs/demo.mp4)
-
-*Click the image to watch the 20-second demo.*
+https://github.com/user-attachments/assets/7bb9ac54-273c-4fdb-be4e-c17cb400e44d
 
 ## Features
 
