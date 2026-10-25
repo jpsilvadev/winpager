@@ -158,7 +158,7 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             spacing: 0.0,
-            vertical_margin: 7.0,
+            vertical_margin: 5.5,
             cell_height: None,
             cell_width: None,
             corner_radius: 0.0,

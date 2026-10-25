@@ -737,9 +737,9 @@ mod tests {
 
     #[test]
     fn shipped_defaults_touching_cells() {
-        // Defaults: no gap, 7 px margins -> 34 px cells in a 48 px taskbar.
+        // Defaults: no gap, 5.5 DIP margins (6 px at 100%) -> 36 px cells in a 48 px taskbar.
         let l = Layout::compute(&wa(7, 0), &LayoutConfig::default(), 48, 96, i32::MAX);
-        assert_eq!((l.cells[0].height(), l.cells[0].top), (34.0, 7.0));
+        assert_eq!((l.cells[0].height(), l.cells[0].top), (36.0, 6.0));
         assert_eq!(l.cells[1].left, l.cells[0].right);
     }
 }
