@@ -8,7 +8,11 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, bail};
 use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, PostMessageW, SetForegroundWindow,
+};
+use windows::core::{PCWSTR, w};
 
 use crate::model::{DesktopInfo, Hwnd, to_hwnd};
 
@@ -75,11 +79,38 @@ fn invalidate() {
 }
 
 pub fn switch_to(index: usize) -> anyhow::Result<()> {
+    focus_taskbar();
     let r = winvd::switch_desktop(index as u32)
         .map_err(err)
         .with_context(|| format!("switching to desktop {index}"));
     invalidate();
     r
+}
+
+/// Hand the foreground to the taskbar before a switch. On a switch, explorer activates the
+/// last active window of the target desktop; while another app (typically Chromium/CEF)
+/// holds the foreground, that activation is refused by the foreground lock and the window
+/// flashes its taskbar button instead. Starting from the taskbar avoids that. Our UI thread
+/// usually isn't allowed to set the foreground, so it borrows the foreground thread's input
+/// state for the call.
+fn focus_taskbar() {
+    unsafe {
+        let Ok(tray) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) else { return };
+        let fg = GetForegroundWindow();
+        if fg == tray {
+            return;
+        }
+        let me = GetCurrentThreadId();
+        let fg_thread = if fg.is_invalid() { 0 } else { GetWindowThreadProcessId(fg, None) };
+        let attach = fg_thread != 0 && fg_thread != me;
+        if attach {
+            let _ = AttachThreadInput(me, fg_thread, true);
+        }
+        let _ = SetForegroundWindow(tray);
+        if attach {
+            let _ = AttachThreadInput(me, fg_thread, false);
+        }
+    }
 }
 
 /// Create a new desktop at the end of the list.
