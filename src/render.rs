@@ -628,7 +628,9 @@ impl Frame<'_> {
             self.pen.fill(cell, radius, th.current_fill);
         }
 
-        let inner = deflate(cell, 1.0);
+        // Inside the 1 px border, a 1 DIP strip of cell background that windows never cover,
+        // so the desktop edge stays visible even when windows are tiled edge to edge.
+        let inner = deflate(cell, 1.0 + (self.scale).round().max(1.0));
 
         // Desktop label, behind the windows.
         if self.cfg.show_names {
